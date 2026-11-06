@@ -1,6 +1,7 @@
 import AppKit
 import Virtualization
 import TerminalMacCore
+import TerminalUI
 import Darwin
 
 @MainActor
@@ -196,4 +197,4 @@ final class MachineRuntime: NSObject, VZVirtualMachineDelegate, NSWindowDelegate
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) { stderr(error.localizedDescription); exit(1) }
 }
 
-func stderr(_ message: String) { FileHandle.standardError.write(Data((message + "\n").utf8)) }
+func stderr(_ message: String) { FileHandle.standardError.write(Data((TerminalText.escaped(message) + "\n").utf8)) }

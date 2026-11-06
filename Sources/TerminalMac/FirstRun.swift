@@ -65,14 +65,14 @@ extension CLI {
         if readiness != .ready {
             _ = try await host(name, action: "show")
             showedSetup = true
-            stderr("""
-            Finish first-time setup in the virtual Mac window:
-              1. Complete macOS setup and sign in to its desktop.
-              2. Open Finder → /Volumes/My Shared Files/tools → TerminalMacGuest.app.
-                 It installs itself in the guest and registers for future guest logins.
-              3. Use its two buttons to allow Screen Recording and Accessibility.
-            Waiting for the virtual Mac to be ready. You can rerun this command later.
-            """)
+            for line in [
+                "Finish first-time setup in the virtual Mac window:",
+                "  1. Complete macOS setup and sign in to its desktop.",
+                "  2. Open Finder → /Volumes/My Shared Files/tools → TerminalMacGuest.app.",
+                "     It installs itself in the guest and registers for future guest logins.",
+                "  3. Use its two buttons to allow Screen Recording and Accessibility.",
+                "Waiting for the virtual Mac to be ready. You can rerun this command later."
+            ] { stderr(line) }
         }
         let deadline = Date().addingTimeInterval(Double(timeout))
         var lastReadiness = readiness

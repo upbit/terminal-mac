@@ -2,9 +2,14 @@ import Foundation
 
 /// A run of text with one style. Widths count characters, so keep to single-width glyphs.
 public struct Span {
-    public var text: String
+    private var displayText: String
+    public var text: String {
+        get { displayText }
+        set { displayText = TerminalText.escaped(newValue) }
+    }
+    /// Only application-owned terminal sequences belong in style, never external text.
     public var style: String = ""
-    public init(_ text: String, _ style: String = "") { self.text = text; self.style = style }
+    public init(_ text: String, _ style: String = "") { displayText = TerminalText.escaped(text); self.style = style }
 }
 
 extension Array where Element == Span {
