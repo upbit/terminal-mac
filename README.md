@@ -1,5 +1,9 @@
 # terminal-mac
 
+[![](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/govijr)
+<a href="https://buymeacoffee.com/govijr" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 21px !important;width: 108px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
+
+
 A separate macOS desktop for computer-use agents, viewed and controlled from a terminal.
 
 `terminal-mac` is an early release candidate for Apple silicon. Apple Virtualization runs a real macOS guest. A bundled helper **inside that guest** captures its screen and posts input events. A terminal viewer streams that screen using Kitty or iTerm2 graphics. Agent commands use the same helper without moving the physical Mac's pointer or changing its clipboard.
@@ -185,3 +189,7 @@ swift test --disable-sandbox --scratch-path /tmp/terminal-mac-build \
 Tests cover mailbox round trips, expiry and cleanup, file-boundary defenses, name/option validation, fragmented UTF-8 and terminal input sequences. These are automated protocol checks, not evidence that a guest was installed, booted, granted permissions, or controlled successfully. See [docs/VALIDATION.md](docs/VALIDATION.md) for recorded results and the live checklist.
 
 References: [terminal-browser](https://terminal-browser.com/), [Apple's macOS virtualization sample](https://developer.apple.com/documentation/virtualization/running-macos-in-a-virtual-machine-on-apple-silicon), [VZVirtualMachineView](https://developer.apple.com/documentation/virtualization/vzvirtualmachineview), [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit).
+
+## Sponsor
+
+terminal-mac is free and maintained in my own time. [Sponsoring](https://github.com/sponsors/govijr) keeps it that way.
