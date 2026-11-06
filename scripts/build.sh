@@ -35,7 +35,8 @@ swift build "${build_options[@]}" -c "$configuration"
 binary_dir="$(swift build "${build_options[@]}" -c "$configuration" --show-bin-path)"
 app="$PWD/dist/TerminalMac.app"
 guest="$app/Contents/Resources/guest-tools/TerminalMacGuest.app"
-mkdir -p "$app/Contents/MacOS" "$guest/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$guest/Contents/MacOS" \
+         "$app/Contents/Resources" "$guest/Contents/Resources"
 # Replace rather than overwrite: rewriting a running VM's executable in place can kill it.
 rm -f "$app/Contents/MacOS/terminal-mac" "$guest/Contents/MacOS/terminal-mac"
 cp "$binary_dir/terminal-mac" "$app/Contents/MacOS/terminal-mac"
@@ -51,11 +52,21 @@ make_plist() {
   /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $build_number" "$destination"
   /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 14.0' "$destination"
   /usr/libexec/PlistBuddy -c 'Add :NSHighResolutionCapable bool true' "$destination"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$destination"
 }
 # The agent skill ships inside the app so `terminal-mac skills get` always matches this build.
 rm -rf "$app/Contents/Resources/skills"
 mkdir -p "$app/Contents/Resources/skills"
 cp -R skills/terminal-mac "$app/Contents/Resources/skills/"
+# Both apps show the same icon: the host for the VM window and Dock, the guest for the copy users
+# open inside the virtual Mac during setup. The .icns is the committed source of truth; regenerate
+# it from new artwork with: iconutil --convert icns -o resources/AppIcon.icns <iconset>
+icon_source="$PWD/resources/AppIcon.icns"
+[[ -f "$icon_source" ]] || { echo "Icon is missing: $icon_source" >&2; exit 1; }
+for bundle in "$guest" "$app"; do
+  rm -f "$bundle/Contents/Resources/AppIcon.icns"
+  cp "$icon_source" "$bundle/Contents/Resources/AppIcon.icns"
+done
 make_plist "$guest/Contents/Info.plist" dev.terminal-mac.guest TerminalMacGuest
 make_plist "$app/Contents/Info.plist" dev.terminal-mac.host TerminalMac
 # Guest has no Virtualization entitlement. Its guarded mode only controls the VM desktop.
