@@ -16,8 +16,8 @@ if [[ -z "$identity" ]]; then
   fi
 fi
 echo "Signing with: $identity"
-version="${VERSION:-0.2.1}"
-build_number="${BUILD_NUMBER:-7}"
+version="${VERSION:-0.2.0}"
+build_number="${BUILD_NUMBER:-6}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
   echo 'VERSION must be x.y.z and BUILD_NUMBER a positive integer.' >&2
   exit 1

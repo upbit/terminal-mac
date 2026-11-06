@@ -1,10 +1,10 @@
 {
   "name": "terminal-mac",
-  "version": "0.2.1",
-  "description": "Computer use in a separate virtual Mac with optional task/chain tracing and action reasons. Requires the matching terminal-mac CLI on PATH.",
+  "version": "0.2.0",
+  "description": "Computer use in a separate virtual Mac: screenshot, click, type and shortcut tools plus a skill for driving the guest. Requires the terminal-mac CLI on PATH.",
   "author": { "name": "Govijr", "url": "https://github.com/govijr" },
-  "homepage": "https://github.com/upbit/terminal-mac",
-  "repository": "https://github.com/upbit/terminal-mac",
+  "homepage": "https://github.com/govijr/terminal-mac",
+  "repository": "https://github.com/govijr/terminal-mac",
   "license": "MIT",
   "keywords": ["computer-use", "macos", "virtual-machine", "mcp"],
   "mcpServers": {

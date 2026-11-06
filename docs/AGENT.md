@@ -10,19 +10,6 @@ claude mcp add terminal-mac -- /absolute/path/to/terminal-mac mcp default
 
 If a tool reports that the guest has no logged-in session, ask the user to sign in (`terminal-mac view NAME`, then Ctrl+O).
 
-## Optional Tracing
-
-Upgraded servers expose `trace_begin`, `chain_begin`, `chain_end`, `trace_end`, and
-`trace_status`. The packaged skill documents optional goal/context/reason usage
-and old-server fallback. A task may span MCP calls and CLI processes using the
-same opaque context. Existing desktop tools accept `actor: "ai"` as explicit
-caller-reported provenance; actor is otherwise unknown, not inferred from transport.
-
-The plugin starts the binary on PATH. Update both the executable and plugin/skill,
-then restart MCP; reinstalling the plugin alone does not update the executable.
-See [TRACING.md](TRACING.md) and [TRACING_PROGRESS.md](TRACING_PROGRESS.md) for
-configuration, implementation coverage, and acceptance evidence.
-
 ## CLI and full instructions
 
 The complete agent guide is the skill at [skills/terminal-mac/SKILL.md](../skills/terminal-mac/SKILL.md), which also ships inside the app (`terminal-mac skills get`). The CLI notes below are kept for reference.

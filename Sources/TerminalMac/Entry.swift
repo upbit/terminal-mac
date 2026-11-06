@@ -1,6 +1,5 @@
 import AppKit
 import TerminalMacCore
-import TerminalMacTracing
 import Darwin
 
 @main
@@ -17,14 +16,9 @@ struct Entry {
         if needsApplication { NSApplication.shared.setActivationPolicy(.accessory) }
         let cli = CLI()
         Task { @MainActor in
-            do {
-                try await cli.run(Array(CommandLine.arguments.dropFirst()))
-                await cli.shutdownTracing()
-                exit(0)
-            }
+            do { try await cli.run(Array(CommandLine.arguments.dropFirst())); exit(0) }
             catch {
                 stderr("terminal-mac: \(error.localizedDescription)")
-                await cli.shutdownTracing()
                 if guestMode {
                     let alert = NSAlert(); alert.messageText = "terminal-mac guest setup"
                     alert.informativeText = error.localizedDescription; alert.runModal()

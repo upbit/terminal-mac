@@ -2,7 +2,6 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import TerminalMacCore
-import TerminalMacTracing
 import UniformTypeIdentifiers
 
 /// A Model Context Protocol server over stdio, so agents get computer-use tools for the guest
@@ -12,31 +11,17 @@ import UniformTypeIdentifiers
 final class AgentServer {
     let store: Store
     let name: String
-    let tracing: LangfuseTracing
-    private var lastCorrelation: [String: Any] = [:]
-    private let sessionID = UUID().uuidString
-    init(store: Store, name: String, tracing: LangfuseTracing? = nil) {
-        self.store = store; self.name = name; self.tracing = tracing ?? LangfuseTracing(version: appVersion)
-    }
+    init(store: Store, name: String) { self.store = store; self.name = name }
 
     static let instructions = """
     Controls a separate virtual Mac, not the user's own desktop. Call `screenshot` first; every \
     x/y is a pixel in that screenshot (top-left origin), which equals guest screen points. \
     Take another screenshot after actions to check the result. If the guest is at its login \
-    screen or a macOS permission prompt appears, ask the user to handle it. When trace_begin \
-    and chain_begin are available, optionally group the task and its steps, copy returned \
-    contexts into actions, and provide a short purpose in reason. Tracing is optional and \
-    never authorizes an action. End child chains before ending their task; report only \
-    observed results, not success inferred from Done.
+    screen or a macOS permission prompt appears, ask the user to handle it.
     """
 
     private static func schema(_ properties: [String: Any], required: [String] = []) -> [String: Any] {
-        let tracing: [String: Any] = [
-            "context": ["type": "string", "description": "Optional opaque task/chain context returned by trace_begin or chain_begin."],
-            "reason": ["type": "string", "maxLength": 1024, "description": "Optional brief action purpose, not private chain-of-thought."],
-            "actor": ["type": "string", "enum": ["ai", "human", "unknown"], "description": "Optional caller-reported action provenance."]
-        ]
-        return ["type": "object", "properties": properties.merging(tracing) { value, _ in value }, "required": required, "additionalProperties": false]
+        ["type": "object", "properties": properties, "required": required, "additionalProperties": false]
     }
     private static let point: [String: Any] = ["type": "integer", "minimum": 0]
     private static let after: [String: Any] = ["type": "boolean", "description": "Also return a screenshot taken shortly after the action."]
@@ -57,16 +42,6 @@ final class AgentServer {
         ["name": "key", "description": "Press a key or chord: return, tab, escape, backspace, up, cmd+space, cmd+tab, cmd+c, cmd+shift+... Modifiers: cmd, ctrl, alt, shift.",
          "inputSchema": schema(["key": ["type": "string"], "screenshot": after], required: ["key"])],
         ["name": "status", "description": "Report whether the VM is running and the guest helper has its privacy permissions.",
-         "inputSchema": schema([:]), "annotations": ["readOnlyHint": true]],
-        ["name": "trace_begin", "description": "Begin an optional desktop task trace. Returns an opaque context; normal desktop tools work without it.",
-         "inputSchema": schema(["goal": ["type": "string", "maxLength": 4096], "session": ["type": "string", "maxLength": 200]], required: ["goal"])],
-        ["name": "chain_begin", "description": "Begin a multi-step chain under an explicit task/chain context. Copy the returned context into its actions.",
-         "inputSchema": schema(["goal": ["type": "string", "maxLength": 4096]], required: ["goal", "context"])],
-        ["name": "chain_end", "description": "End a chain after its children and calls finish. Outcome and summary are caller-reported, not inferred success.",
-         "inputSchema": schema(["outcome": ["type": "string", "enum": ["success", "failed", "cancelled"]], "summary": ["type": "string", "maxLength": 4096]], required: ["context", "outcome"])],
-        ["name": "trace_end", "description": "End a task after its chains finish. Repeated end is idempotent.",
-         "inputSchema": schema(["outcome": ["type": "string", "enum": ["success", "failed", "cancelled"]], "summary": ["type": "string", "maxLength": 4096]], required: ["context", "outcome"])],
-        ["name": "trace_status", "description": "Report tracing availability and bounded delivery queue counters without credentials.",
          "inputSchema": schema([:]), "annotations": ["readOnlyHint": true]]
     ]
 
@@ -90,58 +65,23 @@ final class AgentServer {
             case "tools/call":
                 let tool = params["name"] as? String ?? ""
                 let arguments = params["arguments"] as? [String: Any] ?? [:]
-                lastCorrelation = [:]
-                do {
-                    let content = try await call(tool, arguments, requestID: String(describing: id))
-                    send(["jsonrpc": "2.0", "id": id, "result": ["content": content, "_meta": ["terminal-mac/tracing": lastCorrelation]]])
-                }
-                catch { send(["jsonrpc": "2.0", "id": id, "result": ["content": [["type": "text", "text": explain(error)]], "isError": true,
-                    "_meta": ["terminal-mac/tracing": lastCorrelation]]]) }
+                do { send(["jsonrpc": "2.0", "id": id, "result": ["content": try await call(tool, arguments)]]) }
+                catch { send(["jsonrpc": "2.0", "id": id, "result": ["content": [["type": "text", "text": explain(error)]], "isError": true]]) }
             default: send(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "Method not found"]])
             }
         }
     }
 
-    func call(_ tool: String, _ a: [String: Any], requestID: String? = nil) async throws -> [[String: Any]] {
-        if ["trace_begin", "chain_begin", "chain_end", "trace_end", "trace_status"].contains(tool) {
-            let result: [String: Any]
-            switch tool {
-            case "trace_status": result = try tracing.diagnostics()
-            case "trace_begin", "chain_begin":
-                if tool == "chain_begin", a["context"] as? String == nil { throw Failure("Missing parent context") }
-                result = try tracing.begin(goal: a["goal"] as? String ?? "", parent: tool == "chain_begin" ? a["context"] as? String : nil,
-                    reason: a["reason"] as? String, sessionID: a["session"] as? String ?? sessionID)
-            default:
-                result = try tracing.end(context: a["context"] as? String ?? "", chain: tool == "chain_end",
-                    outcome: a["outcome"] as? String ?? "", summary: a["summary"] as? String ?? "")
-            }
-            let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
-            return [["type": "text", "text": String(decoding: data, as: UTF8.self)]]
-        }
-        return try await tracing.observeTool(tool, arguments: a, channel: "mcp", sessionID: sessionID,
-                                      contextHandle: a["context"] as? String, reason: a["reason"] as? String,
-                                      actor: a["actor"] as? String ?? "unknown", requestID: requestID,
-                                      errorOutput: { [self] error in
-                                          ["ok": false, "error": "tool-failed", "isError": true,
-                                           "message": explain(error), "content": [["type": "text", "text": explain(error)]]]
-                                      }, correlation: { self.lastCorrelation = $0 }, output: tracing.toolOutput) {
-            try await performCall(tool, a)
-        }
-    }
-
-    private func performCall(_ tool: String, _ a: [String: Any]) async throws -> [[String: Any]] {
+    private func call(_ tool: String, _ a: [String: Any]) async throws -> [[String: Any]] {
         func int(_ key: String) throws -> String {
-            guard let value = a[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
-                  value.doubleValue.isFinite, value.doubleValue.rounded() == value.doubleValue,
-                  (-1_000_000...1_000_000).contains(value.doubleValue) else { throw Failure("Missing or invalid integer '\(key)'") }
-            return String(value.intValue)
+            guard let value = a[key] as? Int ?? (a[key] as? Double).map({ Int($0) }) else { throw Failure("Missing integer '\(key)'") }
+            return String(value)
         }
         func string(_ key: String) throws -> String {
             guard let value = a[key] as? String, !value.isEmpty else { throw Failure("Missing '\(key)'") }
             return value
         }
         var requests: [Request] = []
-        tracing.recordInput(["tool": tool, "arguments": a])
         switch tool {
         case "screenshot": return try await screenshot()
         case "status":
@@ -191,18 +131,14 @@ final class AgentServer {
         guard let destination = CGImageDestinationCreateWithData(jpeg, UTType.jpeg.identifier as CFString, 1, nil) else { throw Failure("Cannot encode screenshot") }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw Failure("Cannot encode screenshot") }
-        tracing.recordScreenshot(width: image.width, height: image.height, bytes: jpeg.length)
-        await tracing.recordScreenshotMedia(jpeg as Data, mimeType: "image/jpeg")
         return [["type": "image", "data": (jpeg as Data).base64EncodedString(), "mimeType": "image/jpeg"],
                 ["type": "text", "text": "Screen: \(image.width)×\(image.height). Use these pixel coordinates."]]
     }
 
     private func exchange() throws -> Mailbox { try Mailbox(store.directory(name).appendingPathComponent("exchange")) }
     private func guest(_ request: Request, mailbox: Mailbox? = nil) async throws -> Reply {
-        try await tracing.observeGuest(request) {
-            try requireRunning()
-            return try await (mailbox ?? exchange()).call(request)
-        }
+        try requireRunning()
+        return try await (mailbox ?? exchange()).call(request)
     }
     /// Checked per call, so the server starts (and lists its tools) before any VM exists.
     private func requireRunning() throws {

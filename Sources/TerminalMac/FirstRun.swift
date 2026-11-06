@@ -1,18 +1,17 @@
 import AppKit
 import Virtualization
 import TerminalMacCore
-import TerminalMacTracing
 
 extension CLI {
     func up(_ input: [String]) async throws {
-        let args = try arguments(input, flags: ["plan", "no-view", "detach", "offline", "trace-manual"], options: ["ipsw", "cpus", "memory", "disk", "width", "height", "timeout", "protocol"])
+        let args = try Arguments(input, flags: ["plan", "no-view", "detach", "offline"], options: ["ipsw", "cpus", "memory", "disk", "width", "height", "timeout", "protocol"])
         let name = try args.machineName()
         let directory = try store.directory(name)
         let existing = FileManager.default.fileExists(atPath: directory.appendingPathComponent("machine.json").path) ? try store.load(name) : nil
         let plan = SetupPlan(name: name, machine: existing, hasLocalImage: args.options["ipsw"] != nil)
         if args.flags.contains("plan") {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            cliPrint(String(decoding: try encoder.encode(plan), as: UTF8.self)); return
+            print(String(decoding: try encoder.encode(plan), as: UTF8.self)); return
         }
         // Fail before any download or disk creation if host/package support is missing.
         guard VZVirtualMachine.isSupported else { throw Failure("This Mac cannot start a virtual Mac. Use Apple silicon and an installed, signed terminal-mac release.") }
@@ -34,20 +33,13 @@ extension CLI {
             guard !runtimeIsLocked(directory) else { throw Failure("An incomplete VM is running. Stop it before retrying installation.") }
             let image: URL
             if let local = args.options["ipsw"] { image = URL(fileURLWithPath: (local as NSString).expandingTildeInPath) }
-            else {
-                image = try await tracing.observeTool("unknown", arguments: [:], channel: "cli",
-                    operationName: "prepare-restore-image", output: { ["available": !$0.path.isEmpty] }) { try await cachedRestoreImage() }
-                await tracing.checkpoint()
-            }
+            else { image = try await cachedRestoreImage() }
             var createInput = [name, "--ipsw", image.path]
             for key in ["cpus", "memory", "disk", "width", "height"] {
                 if let value = args.options[key] { createInput += ["--\(key)", value] }
             }
             if args.flags.contains("offline") { createInput += ["--offline"] }
-            try await tracing.observeTool("unknown", arguments: [:], channel: "cli", operationName: "install-guest-os", output: { _ in ["installed": true] }) {
-                try await VirtualMachines.create(Arguments(createInput, flags: ["offline"], options: ["ipsw", "cpus", "memory", "disk", "width", "height"]), store: store, retryIncomplete: true)
-            }
-            await tracing.checkpoint()
+            try await VirtualMachines.create(Arguments(createInput, flags: ["offline"], options: ["ipsw", "cpus", "memory", "disk", "width", "height"]), store: store, retryIncomplete: true)
         } else if !Set(args.options.keys).intersection(["ipsw", "cpus", "memory", "disk", "width", "height"]).isEmpty || args.flags.contains("offline") {
             throw Failure("This VM already exists. Creation options only apply to a new VM; run terminal-mac up \(name) without them.")
         }
@@ -67,8 +59,7 @@ extension CLI {
         // After first-time setup, the terminal viewer handles a guest at its login screen itself.
         let inline = !args.flags.contains("no-view") && (TerminalViewer.supportsCurrentTerminal || args.options["protocol"] != nil)
         if readiness != .ready, inline, FileManager.default.fileExists(atPath: TerminalViewer.readyMarker(directory).path) {
-            try await TerminalViewer(directory: directory, machine: store.load(name), graphics: args.options["protocol"], readOnly: false,
-                tracing: tracing, traceManual: args.flags.contains("trace-manual"), traceContext: commandContext).run()
+            try await TerminalViewer(directory: directory, machine: store.load(name), graphics: args.options["protocol"], readOnly: false).run()
             return
         }
         if readiness != .ready {
@@ -108,8 +99,7 @@ extension CLI {
             return
         }
         if showedSetup { _ = try await host(name, action: "hide") }
-        try await TerminalViewer(directory: directory, machine: store.load(name), graphics: args.options["protocol"], readOnly: false,
-            tracing: tracing, traceManual: args.flags.contains("trace-manual"), traceContext: commandContext).run()
+        try await TerminalViewer(directory: directory, machine: store.load(name), graphics: args.options["protocol"], readOnly: false).run()
     }
 
     private func cachedRestoreImage() async throws -> URL {
