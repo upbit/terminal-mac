@@ -35,7 +35,7 @@ terminal-mac gives agents computer use in a separate virtual Mac, through MCP to
 **Claude Code**, with the MCP server and skill in one plugin:
 
 ```text
-/plugin install terminal-mac --marketplace govijr/terminal-mac
+/plugin install terminal-mac --marketplace upbit/terminal-mac
 ```
 
 Or add them separately:
@@ -47,9 +47,19 @@ terminal-mac skills install                 # → ~/.claude/skills/terminal-mac/
 
 **Other MCP clients** (Cursor, VS Code, Codex, Windsurf…): paste the output of `terminal-mac mcp --config` into the client's MCP settings. Use `terminal-mac mcp NAME` for a VM other than `default`.
 
-**Any agent with a skills folder:** `terminal-mac skills install --dir PATH`, or `npx skills add govijr/terminal-mac --skill terminal-mac`. In an `AGENTS.md`, a line like "Before using the virtual Mac, run `terminal-mac skills get`" gives the agent instructions that match the installed version.
+**Any agent with a skills folder:** `terminal-mac skills install --dir PATH`, or `npx skills add upbit/terminal-mac --skill terminal-mac`. In an `AGENTS.md`, a line like "Before using the virtual Mac, run `terminal-mac skills get`" gives the agent instructions that match the installed version.
 
 The tools only drive the guest helper. They never touch your own desktop. When the guest is at its login screen, they say so, so the agent can ask you to sign in.
+
+### Optional Langfuse tracing
+
+MCP tool calls and public CLI commands can export host-side traces to Langfuse using
+the official OpenTelemetry Swift SDK. Tracing is off until both project API keys and
+an explicit Langfuse base URL are present in `.env` or the process environment. See
+[docs/TRACING.md](docs/TRACING.md) for setup, privacy guarantees, and validation.
+The guest helper and continuous viewer frames are not instrumented. Manual Viewer
+actions are opt-in. Plugin `0.2.1` requires the matching updated executable;
+[docs/TRACING_CLIENT_TEST.md](docs/TRACING_CLIENT_TEST.md) covers client updates.
 
 ## One-time guest setup
 

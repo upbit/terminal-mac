@@ -10,3 +10,7 @@ dist/
 *.p12
 *.p8
 *.cer
+# Local telemetry credentials.
+.env
+.env.*
+!.env.example

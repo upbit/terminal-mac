@@ -1,13 +1,21 @@
 import AppKit
 import Virtualization
 import TerminalMacCore
+import TerminalMacTracing
 import Darwin
 
 @MainActor
 final class CLI {
-    let store = Store()
+    let store: Store
+    lazy var tracing = LangfuseTracing(version: appVersion)
+    private var tracingUsed = false
+    var commandContext: String?
     var runtime: MachineRuntime?
     var guest: GuestRuntime?
+    init(store: Store = Store(), tracing: LangfuseTracing? = nil) {
+        self.store = store
+        if let tracing { self.tracing = tracing }
+    }
     var executableURL: URL {
         (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
             .standardizedFileURL.resolvingSymlinksInPath()
@@ -18,18 +26,74 @@ final class CLI {
     }
     func run(_ input: [String], quietStartup: Bool = false) async throws {
         let command = input.first ?? (Bundle.main.bundleIdentifier == "dev.terminal-mac.guest" ? "guest" : (isatty(STDIN_FILENO) == 1 ? "up" : "help"))
+        if ["guest", "__run", "mcp", "trace", "chain", "action"].contains(command) {
+            if !["guest", "__run"].contains(command) { tracingUsed = true }
+            try await performRun(input, quietStartup: quietStartup)
+            return
+        }
+        tracingUsed = true
+        let options = Self.tracingOptions(Array(input.dropFirst()))
+        let output = CommandOutput()
+        let safeCommand = Self.commandName(command)
+        try await tracing.observeTool("unknown", arguments: [:], channel: "cli", contextHandle: options.context,
+            reason: options.reason, actor: options.actor, operationName: "execute-\(safeCommand)-command",
+            errorOutput: { [self] error in
+                tracing.recordMetadata(["exit_code": "1"])
+                return ["ok": false, "exit_code": 1, "error": error.localizedDescription]
+            }, output: { _ in ["ok": true, "exit_code": 0, "returned": output.entries] }) {
+                try await CommandOutput.$current.withValue(output) {
+                    let previousContext = commandContext
+                    commandContext = options.context
+                    defer { commandContext = previousContext }
+                    tracing.recordInput(["command": safeCommand, "argument_count": options.remaining.count])
+                    try await performRun([command] + options.remaining, quietStartup: quietStartup)
+                    tracing.recordMetadata(["exit_code": "0"])
+                }
+            }
+    }
+
+    func shutdownTracing() async {
+        if tracingUsed { await tracing.shutdown() }
+    }
+
+    func arguments(_ input: [String], flags: Set<String> = [], options: Set<String> = []) throws -> Arguments {
+        let args = try Arguments(input, flags: flags, options: options)
+        tracing.recordInput(["positionals": args.positionals, "options": args.options, "flags": args.flags.sorted()])
+        return args
+    }
+
+    static func commandName(_ value: String) -> String {
+        let aliases = ["--help": "help", "-h": "help", "--version": "version", "list": "ls", "setup": "up"]
+        let name = aliases[value] ?? value
+        return ["help", "version", "up", "doctor", "image", "create", "ls", "start", "status", "show", "hide", "pause", "resume", "stop", "display", "skills", "view"].contains(name) ? name : "unknown"
+    }
+
+    static func tracingOptions(_ input: [String]) -> (remaining: [String], context: String?, reason: String?, actor: String) {
+        var remaining: [String] = [], values: [String: String] = [:], index = 0
+        while index < input.count {
+            if input[index] == "--" { remaining += input[index...]; break }
+            if ["--context", "--reason", "--actor"].contains(input[index]), index + 1 < input.count,
+               !input[index + 1].hasPrefix("--"), values[input[index]] == nil {
+                values[input[index]] = input[index + 1]; index += 2
+            } else { remaining.append(input[index]); index += 1 }
+        }
+        return (remaining, values["--context"], values["--reason"], values["--actor"] ?? "unknown")
+    }
+
+    private func performRun(_ input: [String], quietStartup: Bool = false) async throws {
+        let command = input.first ?? (Bundle.main.bundleIdentifier == "dev.terminal-mac.guest" ? "guest" : (isatty(STDIN_FILENO) == 1 ? "up" : "help"))
         let tail = Array(input.dropFirst())
         switch command {
-        case "help", "--help", "-h": print(Self.help)
-        case "--version", "version": print("terminal-mac \(appVersion)")
+        case "help", "--help", "-h": cliPrint(Self.help)
+        case "--version", "version": cliPrint("terminal-mac \(appVersion)")
         case "up", "setup": try await up(tail)
         case "doctor":
-            _ = try Arguments(tail)
+            _ = try arguments(tail)
             try printJSON(["architecture": "arm64", "virtualizationSupported": String(VZVirtualMachine.isSupported),
                            "macOS": ProcessInfo.processInfo.operatingSystemVersionString, "dataDirectory": store.root.path,
                            "guestToolsBundled": String(FileManager.default.fileExists(atPath: toolsURL.appendingPathComponent("TerminalMacGuest.app").path))])
         case "image":
-            let args = try Arguments(tail, options: ["output"])
+            let args = try arguments(tail, options: ["output"])
             guard args.positionals.isEmpty else { throw Failure("Usage: terminal-mac image [--output /path/to/restore.ipsw]") }
             let image = try await VZMacOSRestoreImage.latestSupported
             guard let output = args.options["output"] else {
@@ -43,19 +107,19 @@ final class CLI {
             defer { try? FileManager.default.removeItem(at: temporary) }
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw Failure("Apple restore-image download failed") }
             try FileManager.default.moveItem(at: temporary, to: destination)
-            print(destination.path)
+            cliPrint(destination.path)
         case "create":
-            let args = try Arguments(tail, flags: ["offline", "standard"], options: ["ipsw", "cpus", "memory", "disk", "width", "height"])
+            let args = try arguments(tail, flags: ["offline", "standard"], options: ["ipsw", "cpus", "memory", "disk", "width", "height"])
             try await VirtualMachines.create(args, store: store)
         case "ls", "list":
-            _ = try Arguments(tail)
+            _ = try arguments(tail)
             let directory = store.root.appendingPathComponent("machines")
             let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
             let machines = urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { try? store.load($0.lastPathComponent) }
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            print(String(decoding: try encoder.encode(machines), as: UTF8.self))
+            cliPrint(String(decoding: try encoder.encode(machines), as: UTF8.self))
         case "start":
-            let args = try Arguments(tail, flags: ["window"])
+            let args = try arguments(tail, flags: ["window"])
             let name = try args.machineName()
             let machine = try store.load(name)
             guard machine.installed else { throw Failure("Installation did not complete. See the VM directory and README recovery instructions.") }
@@ -95,7 +159,7 @@ final class CLI {
             // Keep the app event loop and runtime alive until guest shutdown.
             while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         case "status", "show", "hide", "pause", "resume", "stop":
-            let args = try Arguments(tail, flags: command == "stop" ? ["force"] : [])
+            let args = try arguments(tail, flags: command == "stop" ? ["force"] : [])
             let name = try args.machineName()
             _ = try store.load(name)
             if command == "status", !runtimeIsLocked(try store.directory(name)) {
@@ -104,7 +168,7 @@ final class CLI {
             let reply = try await host(name, action: command, arguments: ["force": String(args.flags.contains("force"))])
             try printJSON(reply.values)
         case "display":
-            let args = try Arguments(tail, flags: ["hidpi", "standard"])
+            let args = try arguments(tail, flags: ["hidpi", "standard"])
             let name = try args.machineName()
             var machine = try store.load(name)
             guard args.flags.count == 1 else { throw Failure("Usage: terminal-mac display [NAME] --hidpi|--standard") }
@@ -113,6 +177,22 @@ final class CLI {
             try store.save(machine)
             try printJSON(["name": name, "display": "\(machine.width)×\(machine.height) points at \(machine.displayScale)x"])
         case "action": try await action(tail)
+        case "trace", "chain":
+            let args = try Arguments(tail, options: ["goal", "context", "reason", "session", "outcome", "summary"])
+            guard args.positionals.count == 1 else { throw Failure("Usage: terminal-mac trace|chain begin|end|status [options]") }
+            let result: [String: Any]
+            switch args.positionals[0] {
+            case "begin":
+                if command == "chain", args.options["context"] == nil { throw Failure("chain begin requires --context") }
+                result = try tracing.begin(goal: args.options["goal"] ?? "", parent: command == "chain" ? args.options["context"] : nil,
+                    reason: args.options["reason"], sessionID: args.options["session"])
+            case "end": result = try tracing.end(context: args.options["context"] ?? "", chain: command == "chain",
+                outcome: args.options["outcome"] ?? "", summary: args.options["summary"] ?? "")
+            case "status": result = try tracing.diagnostics()
+            default: throw Failure("Expected begin, end, or status")
+            }
+            let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            cliPrint(String(decoding: data, as: UTF8.self))
         case "mcp":
             let args = try Arguments(tail, flags: ["config"])
             let name = try args.machineName()
@@ -120,15 +200,15 @@ final class CLI {
                 // Point clients at the launcher, not the versioned bundle, so upgrades keep working.
                 let server: [String: Any] = ["command": launcherPath, "args": name == "default" ? ["mcp"] : ["mcp", name]]
                 let data = try JSONSerialization.data(withJSONObject: ["mcpServers": ["terminal-mac": server]], options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-                print(String(decoding: data, as: UTF8.self)); return
+                cliPrint(String(decoding: data, as: UTF8.self)); return
             }
-            try await AgentServer(store: store, name: name).run()
+            try await AgentServer(store: store, name: name, tracing: tracing).run()
         case "skills":
-            let args = try Arguments(tail, options: ["dir"])
+            let args = try arguments(tail, options: ["dir"])
             guard let skill = bundledSkill else { throw Failure("This build has no bundled skill. Reinstall terminal-mac.") }
             switch args.positionals {
-            case ["get"], []: print(try String(contentsOf: skill, encoding: .utf8), terminator: "")
-            case ["path"]: print(skill.path)
+            case ["get"], []: cliPrint(try String(contentsOf: skill, encoding: .utf8), terminator: "")
+            case ["path"]: cliPrint(skill.path)
             case ["install"]:
                 let root = args.options["dir"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
                     ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/skills")
@@ -142,11 +222,12 @@ final class CLI {
             default: throw Failure("Usage: terminal-mac skills [get|path|install [--dir ~/.claude/skills]]")
             }
         case "view":
-            let args = try Arguments(tail, flags: ["read-only"], options: ["protocol"])
+            let args = try arguments(tail, flags: ["read-only", "trace-manual"], options: ["protocol"])
             let name = try args.machineName()
             let machine = try store.load(name)
             guard runtimeIsLocked(try store.directory(name)) else { throw Failure("VM '\(name)' is stopped. Start it with: terminal-mac start \(name)") }
-            let viewer = try TerminalViewer(directory: store.directory(name), machine: machine, graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"))
+            let viewer = try TerminalViewer(directory: store.directory(name), machine: machine, graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"),
+                tracing: tracing, traceManual: args.flags.contains("trace-manual"), traceContext: commandContext)
             try await viewer.run()
         case "guest":
             let args = try Arguments(tail, flags: ["check"], options: ["exchange"])
@@ -165,14 +246,34 @@ final class CLI {
         try await Mailbox(store.directory(name).appendingPathComponent("host-control")).call(Request(action: action, arguments: arguments, timeout: timeout))
     }
     func action(_ input: [String]) async throws {
-        let args = try Arguments(input, flags: ["double"], options: ["x", "y", "x2", "y2", "dx", "dy", "text", "key", "button", "count", "output", "timeout"])
+        let options = Self.tracingOptions(input)
+        let actions: Set<String> = ["status", "screenshot", "snapshot", "click", "move", "drag", "scroll", "type", "key"]
+        let verb = options.remaining.prefix(2).first { actions.contains($0) } ?? "unknown"
+        var correlation: [String: Any] = [:]
+        _ = try await tracing.observeTool(verb, arguments: [:], channel: "cli", contextHandle: options.context,
+            reason: options.reason, actor: options.actor,
+            errorOutput: { [self] error in
+                tracing.recordMetadata(["exit_code": "1"])
+                return ["ok": false, "exit_code": 1, "error": "tool-failed", "message": error.localizedDescription]
+            }, correlation: { correlation = $0 }, output: tracing.actionOutput) {
+                let (values, envelope) = try await actionResult(options.remaining)
+                if envelope {
+                    let data = try JSONSerialization.data(withJSONObject: ["result": values, "tracing": correlation], options: [.prettyPrinted, .sortedKeys])
+                    cliPrint(String(decoding: data, as: UTF8.self))
+                } else { try printJSON(values) }
+                tracing.recordMetadata(["exit_code": "0"])
+                return values
+            }
+    }
+
+    private func actionResult(_ input: [String]) async throws -> ([String: String], Bool) {
+        let args = try Arguments(input, flags: ["double", "trace-envelope"], options: ["x", "y", "x2", "y2", "dx", "dy", "text", "key", "button", "count", "output", "timeout"])
         let actions: Set<String> = ["status", "screenshot", "snapshot", "click", "move", "drag", "scroll", "type", "key"]
         var positions = args.positionals
         let name: String
         if let first = positions.first, actions.contains(first) { name = "default" }
         else { guard !positions.isEmpty else { throw Failure("Usage: terminal-mac action [NAME] screenshot|click|type|key|scroll|status") }; name = positions.removeFirst() }
         try validateName(name)
-        _ = try store.load(name)
         guard !positions.isEmpty, actions.contains(positions[0]) else { throw Failure("Unknown or missing guest action") }
         let verb = positions.removeFirst()
         var parameters = args.options
@@ -186,19 +287,28 @@ final class CLI {
         guard positions.isEmpty else { throw Failure("Unexpected action arguments") }
         if args.flags.contains("double") { parameters["double"] = "true" }
         let timeout = try args.integer("timeout", default: 15, range: 1...120)
+        tracing.recordInput(["tool": verb == "snapshot" ? "screenshot" : verb, "arguments": parameters])
+        let result = try await performAction(name, verb: verb, parameters: parameters, timeout: timeout, output: args.options["output"])
+        return (result, args.flags.contains("trace-envelope"))
+    }
+
+    private func performAction(_ name: String, verb: String, parameters: [String: String], timeout: Int,
+                               output: String?) async throws -> [String: String] {
+        _ = try store.load(name)
         let mailbox = try Mailbox(store.directory(name).appendingPathComponent("exchange"))
         let request = Request(action: verb, arguments: parameters, timeout: Double(timeout))
         let imageName = "image-\(request.id.uuidString).png"
         defer { mailbox.remove(imageName) }
-        let reply = try await mailbox.call(request)
+        let reply = try await tracing.observeGuest(request) { try await mailbox.call(request) }
         var values = reply.values
         if verb == "screenshot" || verb == "snapshot" {
             guard values["image"] == imageName, let png = try mailbox.read(imageName, limit: 32 * 1024 * 1024) else { throw Failure("Invalid guest image response") }
-            let output = URL(fileURLWithPath: ((args.options["output"] ?? "terminal-mac-\(name).png") as NSString).expandingTildeInPath)
+            let output = URL(fileURLWithPath: ((output ?? "terminal-mac-\(name).png") as NSString).expandingTildeInPath)
             try png.write(to: output, options: .atomic)
             values["image"] = output.path
+            await tracing.recordScreenshotMedia(png, mimeType: "image/png")
         }
-        try printJSON(values)
+        return values
     }
     /// The agent skill shipped inside the app bundle, so its instructions match this version.
     /// Development builds outside a bundle fall back to the repository copy.
@@ -249,6 +359,8 @@ final class CLI {
     start [NAME] [--window]       Boot in the background; show setup window if requested
     view [NAME] [--read-only]     Live terminal desktop (Ghostty, Kitty, iTerm2)
       [--protocol kitty|iterm]    Ctrl+G opens Mac shortcuts; Ctrl+] exits
+      [--trace-manual --context HANDLE] Optional manual timeline; Ctrl+P pauses capture
+                                 Ctrl+T detaches/reattaches the explicit context
     show|hide [NAME]             Show or hide the native VM window
     status|pause|resume [NAME]   Manage the VM
     stop [NAME] [--force]        Request guest shutdown (or immediately power off)
@@ -263,6 +375,13 @@ final class CLI {
     action [NAME] type 'text'
     action [NAME] key cmd+space
     action [NAME] scroll --dy -300 [--dx 0 --x 640 --y 400]
+      [--context HANDLE --reason TEXT --trace-envelope] Optional tracing context
+
+    trace begin --goal TEXT [--session ID]  Begin a task and return its context
+    chain begin --context HANDLE --goal TEXT [--reason TEXT]
+    chain|trace end --context HANDLE --outcome success|failed|cancelled [--summary TEXT]
+    trace status                Tracing availability and queue counters
+    Public commands accept optional --context HANDLE --reason TEXT --actor ai|human
 
     mcp [NAME]                  MCP server (stdio) with computer-use tools for agents:
                                 claude mcp add terminal-mac -- terminal-mac mcp
@@ -284,7 +403,22 @@ let appBundle: Bundle = {
 }()
 var appVersion: String { appBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
 
-func printJSON(_ value: [String: String]) throws {
+@MainActor func printJSON(_ value: [String: String]) throws {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
-    print(String(decoding: data, as: UTF8.self))
+    cliPrint(String(decoding: data, as: UTF8.self))
+}
+
+@MainActor final class CommandOutput {
+    @TaskLocal static var current: CommandOutput?
+    var entries: [Any] = []
+    func append(_ text: String) {
+        guard entries.count < 16 else { return }
+        if let data = text.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) { entries.append(value) }
+        else { entries.append(String(text.prefix(16_384))) }
+    }
+}
+
+@MainActor func cliPrint(_ text: String, terminator: String = "\n") {
+    CommandOutput.current?.append(text)
+    print(text, terminator: terminator)
 }

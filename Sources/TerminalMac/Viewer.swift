@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import TerminalMacCore
+import TerminalMacTracing
 import TerminalUI
 
 @MainActor
@@ -60,14 +61,22 @@ final class TerminalViewer {
     private var grantsCheckedAt = Date.distantPast
     private var inputBlocked: Bool { grants?.input == false }
     private var firstFrameShown = false
+    private let manualTracing: ManualTracing?
+    private let requestedContext: String?
+    private var traceTickets: [UUID: ManualTraceTicket] = [:]
+    private var inputTask: Task<Void, Never>?
+    private var droppedTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Set once a guest helper has answered, so later runs of `up` can skip the native setup window.
     static func readyMarker(_ directory: URL) -> URL { directory.appendingPathComponent("guest-ready") }
 
-    init(directory: URL, machine: Machine, graphics: String?, readOnly: Bool) throws {
+    init(directory: URL, machine: Machine, graphics: String?, readOnly: Bool,
+         tracing: LangfuseTracing? = nil, traceManual: Bool = false, traceContext: String? = nil) throws {
         mailbox = try Mailbox(directory.appendingPathComponent("exchange"))
         host = try Mailbox(directory.appendingPathComponent("host-control"), create: true)
         self.directory = directory; self.machine = machine; self.readOnly = readOnly
+        manualTracing = traceManual && !readOnly ? tracing.map { ManualTracing(tracing: $0) } : nil
+        requestedContext = traceContext
         points = (machine.width, machine.height)
         let env = ProcessInfo.processInfo.environment
         let detected = env["TERM_PROGRAM"] == "iTerm.app" ? "iterm" :
@@ -83,6 +92,11 @@ final class TerminalViewer {
     }
 
     func run() async throws {
+        if let manualTracing, let requestedContext {
+            do { try manualTracing.attach(requestedContext) }
+            catch { record("Manual tracing context unavailable; actions remain independent", ok: false) }
+        }
+        defer { if let manualTracing { try? manualTracing.detach() } }
         var original = termios()
         guard tcgetattr(STDIN_FILENO, &original) == 0 else { throw Failure("Cannot read terminal settings") }
         var raw = original; cfmakeraw(&raw)
@@ -141,8 +155,16 @@ final class TerminalViewer {
             if wheel.dx != 0 || wheel.dy != 0, Date().timeIntervalSince(wheel.at) >= 0.03 { flushWheel() }
             sendNextInput()
             if Date().timeIntervalSince(lastChrome) >= 0.08 { lastChrome = Date(); drawChrome() }
-            try await Task.sleep(nanoseconds: 4_000_000)
+            do { try await Task.sleep(nanoseconds: 4_000_000) }
+            catch { failure = error; quit = true }
         }
+        flushWheel()
+        inputTask?.cancel()
+        await inputTask?.value
+        for request in queue { dropTrace(request, cause: "viewer-exit") }
+        queue.removeAll(); labels.removeAll()
+        for task in Array(droppedTasks.values) { await task.value }
+        if let manualTracing { try? manualTracing.detach() }
         if let failure { throw failure }
     }
 
@@ -291,7 +313,10 @@ final class TerminalViewer {
         }
         let latency = activity.last?.milliseconds.map { [Span("  \(Int($0.rounded())) ms", Theme.faint)] } ?? []
         let blocked = stats.frames > 0 && inputBlocked && !readOnly ? [Span("  ⚠ input needs Accessibility", Theme.yellow)] : []
-        let right = (readOnly ? [Span("view only  ", Theme.faint)] : []) + state + blocked + latency + [Span(" ")]
+        let traceState = manualTracing.map { tracer in
+            [Span(tracer.enabled ? (tracer.paused ? "  trace paused" : tracer.attached ? "  trace attached" : "  trace on") : "  trace off", tracer.paused ? Theme.yellow : Theme.muted)]
+        } ?? []
+        let right = (readOnly ? [Span("view only  ", Theme.faint)] : []) + state + blocked + latency + traceState + [Span(" ")]
         var left = [Span(" ◆ terminal-mac ", Theme.badge), Span("  "), Span(machine.name, Theme.bold + Theme.text)]
         let detail = [Span("  macOS", Theme.muted), Span(" · \(points.width)×\(points.height)", Theme.faint),
                       Span(stats.sourceWidth > 0 ? " · \(stats.sourceWidth)×\(stats.sourceHeight) px" : "", Theme.faint)]
@@ -420,33 +445,47 @@ final class TerminalViewer {
     // MARK: Input
 
     /// Input runs one request at a time, in order, without ever blocking drawing or typing.
-    private func enqueue(_ action: String, _ arguments: [String: String], label: String) {
+    private func enqueue(_ action: String, _ arguments: [String: String], label: String, merging previousTicket: ManualTraceTicket? = nil) {
         if action == "type", let last = queue.last, last.action == "type", let previous = last.arguments["text"],
+           traceTickets[last.id].map({ manualTracing?.canMerge($0) ?? true }) ?? true,
            previous.utf8.count + (arguments["text"]?.utf8.count ?? 0) < 32768 {
             let text = previous + (arguments["text"] ?? "")
             let merged = Request(action: "type", arguments: ["text": text], timeout: 5)
             labels[last.id] = nil; labels[merged.id] = Self.typeLabel(text)
+            if let manualTracing { traceTickets[merged.id] = manualTracing.ticket(merging: traceTickets.removeValue(forKey: last.id)) }
             queue[queue.count - 1] = merged; return
         }
-        guard queue.count < 64 else { record("Input is busy; wait a moment", ok: false); return }
         let request = Request(action: action, arguments: arguments, timeout: 5)
+        if let manualTracing { traceTickets[request.id] = manualTracing.ticket(merging: previousTicket) }
+        guard queue.count < 64 else { dropTrace(request, cause: "queue-full"); record("Input is busy; wait a moment", ok: false); return }
         labels[request.id] = label
         queue.append(request)
     }
     private func sendNextInput() {
         guard !inFlight, !queue.isEmpty else { return }
         let request = queue.removeFirst(), label = labels.removeValue(forKey: request.id) ?? request.action
+        let ticket = traceTickets.removeValue(forKey: request.id)
         inFlight = true
-        Task { @MainActor in
+        inputTask = Task { @MainActor in
             let started = Date()
             do {
-                _ = try await mailbox.call(request)
+                if let manualTracing, let ticket { _ = try await manualTracing.execute(request, ticket: ticket) { try await mailbox.call(request) } }
+                else { _ = try await mailbox.call(request) }
                 record(label, ok: true, milliseconds: Date().timeIntervalSince(started) * 1000)
             } catch {
+                for pending in queue { dropTrace(pending, cause: quit ? "viewer-exit" : "previous-failure") }
                 queue.removeAll(); labels.removeAll()
                 record("\(label): \(error.localizedDescription)", ok: false)
             }
             inFlight = false
+        }
+    }
+    private func dropTrace(_ request: Request, cause: String) {
+        guard let manualTracing, let ticket = traceTickets.removeValue(forKey: request.id) else { return }
+        guard droppedTasks.count < 256 else { record("Manual trace drop queue full", ok: false); return }
+        droppedTasks[request.id] = Task {
+            await manualTracing.dropped(request, ticket: ticket, cause: cause)
+            droppedTasks.removeValue(forKey: request.id)
         }
     }
     private static func typeLabel(_ text: String) -> String {
@@ -461,7 +500,24 @@ final class TerminalViewer {
         var text = ""
         func flush() { if !text.isEmpty { enqueue("type", ["text": text], label: Self.typeLabel(text)); text = "" } }
         for event in events {
-            if case .quit = event { quit = true; return }
+            if case .quit = event { flush(); quit = true; return }
+            if case .key("ctrl+p") = event, let manualTracing {
+                flush(); flushWheel()
+                manualTracing.setPaused(!manualTracing.paused)
+                record(manualTracing.paused ? "Manual trace paused" : "Manual trace enabled", ok: true)
+                continue
+            }
+            if case .key("ctrl+t") = event, let manualTracing {
+                flush(); flushWheel()
+                guard queue.isEmpty, !inFlight, droppedTasks.isEmpty else { record("Wait for pending input before changing trace attachment", ok: false); continue }
+                do {
+                    if manualTracing.attached { try manualTracing.detach() }
+                    else if let requestedContext { try manualTracing.attach(requestedContext) }
+                    else { record("No explicit task context for attachment", ok: false); continue }
+                    record(manualTracing.attached ? "Manual trace attached" : "Manual trace detached", ok: true)
+                } catch { record("Manual trace context unavailable", ok: false) }
+                continue
+            }
             if case .key("ctrl+o") = event, (link != .live && link != .snapshots) || inputBlocked { openLoginWindow(); continue }
             guard !readOnly else { continue }
             if palette {
@@ -518,15 +574,18 @@ final class TerminalViewer {
     }
     private func flushWheel() {
         // Consecutive scrolls merge in the queue rather than piling up.
-        if let last = queue.last, last.action == "scroll" {
+        guard wheel.dx != 0 || wheel.dy != 0 else { return }
+        var previousTicket: ManualTraceTicket?
+        if let last = queue.last, last.action == "scroll", traceTickets[last.id].map({ manualTracing?.canMerge($0) ?? true }) ?? true {
             wheel.dy = max(-1000, min(1000, wheel.dy + (Int(last.arguments["dy"] ?? "") ?? 0)))
             wheel.dx = max(-1000, min(1000, wheel.dx + (Int(last.arguments["dx"] ?? "") ?? 0)))
             labels[last.id] = nil; queue.removeLast()
+            previousTicket = traceTickets.removeValue(forKey: last.id)
         }
         var arguments = ["x": String(wheel.x), "y": String(wheel.y), "dy": String(wheel.dy)]
         if wheel.dx != 0 { arguments["dx"] = String(wheel.dx) }
         let arrow = wheel.dy > 0 ? "↑" : wheel.dy < 0 ? "↓" : wheel.dx > 0 ? "←" : "→"
-        enqueue("scroll", arguments, label: "scroll \(arrow)")
+        enqueue("scroll", arguments, label: "scroll \(arrow)", merging: previousTicket)
         wheel.dx = 0; wheel.dy = 0
     }
 }

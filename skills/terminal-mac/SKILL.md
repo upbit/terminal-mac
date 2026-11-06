@@ -36,6 +36,52 @@ terminal-mac action NAME scroll --dy -300 --x X --y Y
 
 Text is sent as Unicode keyboard events, not through the clipboard. No shell-execution action exists.
 
+## Optional task tracing
+
+When `trace_begin` and `chain_begin` are discoverable, prefer grouping a substantial
+task into a trace and its meaningful multi-step behaviors into chains. Tracing is
+optional: if these tools are missing or return `enabled: false`, continue with the
+existing desktop tools. Do not install software or change telemetry settings just
+to make tracing available.
+
+- `trace_begin`: pass a concise `goal` and optional opaque conversation `session`.
+- `chain_begin`: pass the task/parent-chain `context`, the step's `goal`, and a short
+  `reason`, such as "Open Safari to inspect the official API documentation."
+- Copy the returned context unchanged into the chain's desktop tools, including
+  verification screenshots. Set `actor: "ai"` and optionally a brief action reason.
+  A reason is an audit explanation, not private chain-of-thought; omit secrets.
+- `chain_end`, then `trace_end`: pass `context`, `outcome` (`success`, `failed`, or
+  `cancelled`), and a brief observed result in `summary`. "Done" only acknowledges
+  input execution; verify the screen before reporting business success.
+
+Context IDs come from the program, never from the model. Do not reuse a context
+for unrelated work or attach to whichever chain happens to be active. If a context
+is unavailable, ordinary actions still work as independent traces. On interruption,
+close only the contexts you own when possible; otherwise describe the unfinished
+work without inventing completion. Open child chains or attached human branches
+must finish before their parent can close.
+
+The CLI has equivalent commands on upgraded binaries:
+
+```sh
+terminal-mac trace begin --goal 'Inspect API documentation' --session opaque-session
+terminal-mac chain begin --context TASK_HANDLE --goal 'Open browser' --reason 'Read the official documentation'
+terminal-mac action NAME key cmd+space --context CHAIN_HANDLE --actor ai --reason 'Open Spotlight'
+terminal-mac chain end --context CHAIN_HANDLE --outcome success --summary 'Browser opened and verified'
+terminal-mac trace end --context TASK_HANDLE --outcome success --summary 'Documentation inspected'
+```
+
+CLI `trace status` reports availability; old binaries may not recognize it. Default
+action responses remain unchanged, with optional `--trace-envelope` correlation.
+Telemetry credentials stay local to terminal-mac. This skill cannot capture the
+external model API's token usage or create real generation observations.
+
+Manual Viewer tracing is opt-in through `view --trace-manual [--context HANDLE]`.
+The person using the Viewer controls capture pause with Ctrl+P and explicit task
+attachment with Ctrl+T. It does not capture native VM-window or host-wide input.
+Do not enable manual capture on someone's behalf or request content-mode recording
+of passwords, login challenges, payment details, or other sensitive interactions.
+
 ## When to stop and ask the user
 
 - The guest is at its login screen, or the helper is not running (tools report "no logged-in session"): ask the user to sign in, for example `terminal-mac view NAME` then Ctrl+O. Automatic login in the guest avoids this on later boots.
