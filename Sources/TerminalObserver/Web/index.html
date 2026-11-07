@@ -12,25 +12,42 @@
     <div class="phone">
       <div class="screen">
         <div class="camera" aria-hidden="true"></div>
-        <header><strong>terminal-mac</strong><span id="status">Connecting</span></header>
-        <section class="mirror" aria-label="Guest desktop">
-          <canvas id="mirror" width="640" height="400"></canvas>
-          <div id="empty">Waiting for Guest</div>
+        <section class="debug-section" aria-labelledby="debug-title">
+          <h1 id="debug-title">Debug</h1>
+          <div class="debug">
+            <div class="fps-heading">
+              <span class="metric-label">FPS</span>
+              <span class="fps-value"><strong id="fps">0.0</strong><span class="fps-divider">/</span><span id="fps-max">0.0</span><small>Max</small></span>
+            </div>
+            <div id="fps-meter" class="fps-meter" role="progressbar" aria-label="Current FPS" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0">
+              <div id="fps-fill" class="fps-fill"></div>
+            </div>
+            <dl>
+              <dt>Frame</dt><dd id="dimensions">--</dd>
+              <dt>Last batch</dt><dd><span id="batch">--</span><span id="batch-detail" class="batch-detail"></span></dd>
+              <dt>Draw speed</dt><dd id="timing">--</dd>
+              <dt>Transfer</dt><dd id="transfer">0.0 KB/s</dd>
+              <dt>Received</dt><dd id="bytes">0 B</dd>
+            </dl>
+            <pre id="error" role="status" hidden></pre>
+          </div>
+        </section>
+        <section class="desktop" aria-labelledby="desktop-title">
+          <header class="stream-bar">
+            <span id="connection" class="connection" data-health="warning" title="Connecting">
+              <span class="connection-dot" aria-hidden="true"></span><span id="status" role="status">Connecting</span>
+            </span>
+            <h2 id="desktop-title">MacOS</h2>
+            <span id="transfer-live" class="transfer-live">0.0 KB/s</span>
+          </header>
+          <div class="mirror" aria-label="Guest desktop">
+            <canvas id="mirror" width="640" height="400"></canvas>
+            <div id="empty">Waiting for Guest</div>
+          </div>
         </section>
         <div class="home" aria-hidden="true"></div>
       </div>
     </div>
-    <aside aria-label="Debug">
-      <h1>Observer Debug</h1>
-      <dl>
-        <dt>Received</dt><dd id="bytes">0 B</dd>
-        <dt>Image FPS</dt><dd id="fps">0</dd>
-        <dt>Frame</dt><dd id="dimensions">--</dd>
-        <dt>Last batch</dt><dd id="batch">--</dd>
-        <dt>Decode + draw</dt><dd id="timing">--</dd>
-      </dl>
-      <pre id="error" role="status"></pre>
-    </aside>
   </main>
 </body>
 </html>

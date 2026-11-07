@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { crc32 } from 'node:zlib';
-import { parseBatch } from '../../Sources/TerminalObserver/Web/observer.js';
+import { ObserverMeter, parseBatch } from '../../Sources/TerminalObserver/Web/observer.js';
 
 const epoch = '459d11da-fc80-490e-a7a8-7b670cc93a03';
 function envelope({ type = 'full', width = 640, height = 400, blocks, mutate } = {}) {
@@ -54,4 +54,25 @@ test('PNG chunk CRC and missing end reject', () => {
   view.setUint32(start + 41, 123); assert.throws(() => parseBatch(corrupt), /checksum/);
   const incomplete = envelope(), v = new DataView(incomplete), begin = 12 + v.getUint32(8);
   new Uint8Array(incomplete).fill(0, begin + 45); assert.throws(() => parseBatch(incomplete));
+});
+test('FPS and transfer use actual sampling duration, with a 30 FPS ceiling', () => {
+  const meter = new ObserverMeter(0);
+  assert.deepEqual(meter.sample(1000, 120000, 12), { fps: 12, maxFps: 12, kbps: 120 });
+  assert.deepEqual(meter.sample(3000, 320000, 32), { fps: 10, maxFps: 12, kbps: 100 });
+  assert.deepEqual(meter.sample(4000, 340000, 90), { fps: 30, maxFps: 30, kbps: 20 });
+});
+test('static content reports zero FPS and transfer while retaining the peak', () => {
+  const meter = new ObserverMeter(0);
+  meter.sample(1000, 100000, 20);
+  assert.deepEqual(meter.sample(2000, 100000, 20), { fps: 0, maxFps: 20, kbps: 0 });
+});
+test('pause or reconnect resets the window, not cumulative counters or FPS peak', () => {
+  const meter = new ObserverMeter(0);
+  meter.sample(1000, 100000, 25);
+  assert.deepEqual(meter.reset(60000, 100000, 25), { fps: 0, maxFps: 25, kbps: 0 });
+  assert.deepEqual(meter.sample(61000, 110000, 26), { fps: 1, maxFps: 25, kbps: 10 });
+});
+test('duplicate timestamps do not create infinite metrics', () => {
+  const meter = new ObserverMeter(1000);
+  assert.deepEqual(meter.sample(1000, 1000, 30), { fps: 0, maxFps: 0, kbps: 0 });
 });

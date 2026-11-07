@@ -153,7 +153,68 @@ covered by the algorithm tests.
 VM was left running. Latest local observer service is at
 `http://127.0.0.1:33842/` (PID 7558). The former blocker is resolved.
 
-## Remaining Tests
+## Debug UI Follow-up
+
+The debug metrics now sit in a compact text card inside the phone screen. The
+VM mirror sits toward the bottom, with a connection dot and live transfer rate
+directly above it. Debug fields are FPS, Frame, Last batch, Draw speed, Transfer,
+and cumulative Received. Draw speed retains the decode + staging/Canvas commit
+duration rather than claiming a network or end-to-end latency measurement.
+
+FPS is the current one-second image-commit sample and the highest sample seen
+since page load, each capped at 30. The animated bar is current FPS / 30; pauses
+and reconnects reset the sample window but preserve the sampled peak. No image
+changes produces zero FPS without being interpreted as weak networking.
+
+Transfer is received application-message bytes / elapsed time, displayed as
+decimal KB/s (1 KB = 1000 B), in both the debug card and mirror status bar.
+Received is the cumulative application payload, including control messages and
+reconnects, now displayed consistently as decimal B/KB/MB. No WS/TCP overhead or
+network retransmission bytes are inferred.
+
+Green means an image was committed normally. Yellow means connecting/syncing,
+paused, recoverable resync, or a measured decode + draw time exceeding the
+33.3 ms 30 FPS budget. Red means a Guest error, disconnected socket, or lost
+Canvas context. The upstream still does not intentionally reduce FPS, so the
+page does not invent a bandwidth warning just because content is idle.
+
+JS tests: 10 passed, including actual-interval rate calculation, sampled peak,
+30 FPS clamp, zero-image samples, pause/reconnect resets and duplicate timestamps.
+Chrome fixture tests cover nonzero rates and animated meter values, simulated
+slow decode (yellow), idle (healthy/zero), Guest error and socket close (red),
+recovery (green), full/delta pixel oracle, plus 1280/390/320 px layouts with all
+metrics and the mirror inside the phone and no horizontal text overflow.
+
+Latest Swift regression: 31 passed, 2 opt-in tests skipped, 0 failures. Packaged
+frontend resources and signature verification passed without changing the Guest
+helper build number. The observer alone was restarted; no VM lifecycle action
+was needed. Real VM desktop/mobile screenshots show the new card and mirror
+placement; a sample displayed 23.0 current / 23.0 sampled Max FPS, 603.8 KB/s,
+0.5 ms decode + draw and a green connection indicator. This is a UI observation,
+not a performance target. Local screenshots: `debug-live-desktop.png` and
+`debug-live-mobile.png` in the existing temporary screenshots directory.
+Updated preview remains at `http://127.0.0.1:33842/` (observer PID 40084).
+
+## Compact Layout Refinement
+
+Latest layout refinement: the centered `Debug` heading is outside the metrics
+card; the card's ordinary content height is about 200px. `MacOS`, the connection
+indicator and transfer rate share a single 20px title row above the mirror.
+Removed bottom anchoring and used a fixed section gap so the mirror sits in the
+middle/lower screen with whitespace below. At 1280/390/320px browser widths,
+the fixture verified centered outside titles, no header wrapping, card height
+<= 220px, zero horizontal overflow and at least 50px bottom whitespace (observed
+159/156/86px). Pixel oracle and green/yellow/red state tests still pass; ordinary
+Swift regression remains 31 passed, 2 opt-in skipped. Static resources rebuilt
+and signed; only observer service restarted (PID 52420, same port 33842).
+
+During the final real-page check, VM status was `running` but SCK returned
+`No Guest display is available`. The new error layout and red indicator were
+visually verified; no VM lifecycle action or permission change was attempted
+for this layout-only task. Live image display for this final check was unavailable;
+the synthetic image/oracle tests passed.
+
+## Outstanding Coverage
 
 - Browser pixel oracle for every real Guest batch (native metadata oracle and
   synthetic browser oracle are tested separately), other display/scale modes.

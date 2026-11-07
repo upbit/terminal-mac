@@ -199,7 +199,7 @@ final class ObserverTransportTests: XCTestCase {
             let url = URL(string: "http://127.0.0.1:\(port)/")!
             let (page, response) = try await URLSession.shared.data(from: url)
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-            XCTAssertTrue(String(decoding: page, as: UTF8.self).contains("Observer Debug"))
+            XCTAssertTrue(String(decoding: page, as: UTF8.self).contains("id=\"debug-title\">Debug"))
             XCTAssertEqual((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Cache-Control"), "no-store")
             let initialCalls = await source.calls
             XCTAssertEqual(initialCalls, 0)

@@ -16,6 +16,7 @@ try {
     window.WebSocket = class extends Original {
       constructor(...args) {
         super(...args);
+        window.__observerSocket = this;
         this.addEventListener('message', (event) => {
           if (event.data instanceof ArrayBuffer) {
             const view = new DataView(event.data), length = view.getUint32(8);
@@ -39,11 +40,27 @@ try {
       }
     };
   });
+  await context.addInitScript(() => {
+    const original = window.createImageBitmap;
+    window.createImageBitmap = async (...args) => {
+      if (window.__slowDecode) await new Promise((resolve) => setTimeout(resolve, 80));
+      return original(...args);
+    };
+  });
   const page = await context.newPage(), errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(url);
   await page.waitForFunction(() => document.getElementById('empty').hidden);
   await page.waitForFunction(() => window.__observerStats.delta >= 2);
+  await page.waitForFunction(() => Number(document.getElementById('fps').textContent) > 0 &&
+    Number.parseFloat(document.getElementById('transfer').textContent) > 0);
+  const meters = await page.evaluate(() => ({
+    fps: Number(document.getElementById('fps').textContent), max: Number(document.getElementById('fps-max').textContent),
+    rate: document.getElementById('transfer').textContent, liveRate: document.getElementById('transfer-live').textContent,
+    ceiling: document.getElementById('fps-meter').getAttribute('aria-valuemax')
+  }));
+  assert.ok(meters.fps <= meters.max && meters.max <= 30);
+  assert.equal(meters.ceiling, '30'); assert.equal(meters.rate, meters.liveRate);
   const oracle = async () => page.evaluate(() => {
     const canvas = document.getElementById('mirror'), pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     let mismatches = 0;
@@ -62,6 +79,20 @@ try {
   await other.waitForFunction(() => document.getElementById('empty').hidden);
   assert.equal((await oracle()).mismatches, 0);
   await other.close();
+  await page.evaluate(() => { window.__slowDecode = true; });
+  await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'warning' &&
+    document.getElementById('status').textContent === 'Slow draw');
+  assert.match(await page.locator('#error').textContent(), /frame budget/);
+  await page.evaluate(() => { window.__slowDecode = false; });
+  await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'normal');
+  // No image updates is healthy: stop the fixture subscription without hiding the page.
+  await page.evaluate(() => window.__observerSocket.send(JSON.stringify({ type: 'pause' })));
+  await page.waitForTimeout(2500);
+  assert.equal(await page.locator('#fps').textContent(), '0.0');
+  assert.equal(await page.locator('#connection').getAttribute('data-health'), 'normal');
+  assert.equal(await page.locator('#transfer').textContent(), '0.0 KB/s');
+  await page.evaluate(() => window.__observerSocket.send(JSON.stringify({ type: 'resume' })));
+  await page.waitForFunction(() => document.getElementById('empty').hidden && document.getElementById('error').textContent === '');
   const fullBeforeCorruption = await page.evaluate(() => window.__observerStats.full);
   await page.evaluate(() => { window.__corruptNextImage = true; });
   await page.waitForFunction(() => !!window.__corruptedImage);
@@ -75,6 +106,8 @@ try {
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await page.waitForTimeout(300);
+  assert.equal(await page.locator('#connection').getAttribute('data-health'), 'warning');
+  assert.equal(await page.locator('#status').textContent(), 'Paused');
   const paused = await page.evaluate(() => ({ ...window.__observerStats }));
   await page.waitForTimeout(1200);
   assert.deepEqual(await page.evaluate(() => window.__observerStats), paused);
@@ -86,16 +119,48 @@ try {
   await page.waitForFunction(() => document.getElementById('empty').hidden && document.getElementById('error').textContent === '');
   assert.equal((await oracle()).mismatches, 0);
   await page.reload(); await page.waitForFunction(() => document.getElementById('empty').hidden);
+  await page.waitForFunction(() => window.__observerStats.delta >= 2 && Number(document.getElementById('fps').textContent) > 0);
   assert.equal((await oracle()).mismatches, 0);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: `${output}/mobile.png`, fullPage: true });
-  const layout = await page.evaluate(() => {
-    const elements = [...document.querySelectorAll('header, .mirror, aside, dd, pre')];
-    return { width: document.documentElement.scrollWidth, viewport: innerWidth,
-      overflow: elements.some((element) => element.scrollWidth > element.clientWidth + 1) };
+  const layouts = [];
+  for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 740 }]) {
+    await page.setViewportSize(viewport);
+    await page.waitForTimeout(250);
+    const layout = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const debug = rect('.debug'), desktop = rect('.desktop'), screen = rect('.screen'), camera = rect('.camera');
+      const debugTitle = rect('#debug-title'), desktopTitle = rect('#desktop-title'), bar = rect('.stream-bar');
+      const elements = [...document.querySelectorAll('header, .mirror, .debug, dd, pre')];
+      return { width: document.documentElement.scrollWidth, viewport: innerWidth,
+        overflow: elements.some((element) => element.scrollWidth > element.clientWidth + 1),
+        debugInside: debug.top >= camera.bottom && debug.left >= screen.left && debug.right <= screen.right,
+        desktopBelow: desktop.top > debug.bottom, desktopInside: desktop.bottom <= screen.bottom - 20,
+        bottomSpace: screen.bottom - desktop.bottom, compactDebug: debug.height <= 220,
+        titleOutside: debugTitle.bottom <= debug.top,
+        centeredTitles: Math.abs(debugTitle.x + debugTitle.width / 2 - debug.x - debug.width / 2) < 1 &&
+          Math.abs(desktopTitle.x + desktopTitle.width / 2 - bar.x - bar.width / 2) < 1,
+        singleLineHeader: bar.height === 20 };
+    });
+    assert.ok(layout.width <= layout.viewport); assert.equal(layout.overflow, false);
+    assert.ok(layout.debugInside && layout.desktopBelow && layout.desktopInside);
+    assert.ok(layout.titleOutside && layout.centeredTitles && layout.singleLineHeader && layout.compactDebug);
+    assert.ok(layout.bottomSpace >= 50);
+    layouts.push(layout);
+    await page.screenshot({ path: `${output}/debug-${viewport.width}.png`, fullPage: true });
+  }
+  assert.equal(await page.locator('#debug-title').textContent(), 'Debug');
+  assert.equal(await page.locator('#desktop-title').textContent(), 'MacOS');
+  await page.evaluate(() => {
+    window.__observerSocket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'error', message: 'Guest unavailable' }) }));
   });
-  assert.ok(layout.width <= layout.viewport); assert.equal(layout.overflow, false);
+  assert.equal(await page.locator('#connection').getAttribute('data-health'), 'error');
+  assert.equal(await page.locator('#error').textContent(), 'Guest unavailable');
+  await page.evaluate(() => window.__observerSocket.send(JSON.stringify({ type: 'resync' })));
+  await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'normal');
+  await page.evaluate(() => window.__observerSocket.close());
+  await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'error');
+  assert.equal(await page.locator('#status').textContent(), 'Disconnected');
+  await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'normal');
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ status: 'pass', oracle: await oracle(), layout, screenshots: output }, null, 2));
+  console.log(JSON.stringify({ status: 'pass', oracle: await oracle(), meters, layouts, healthStates: 'green/yellow/red passed', screenshots: output }, null, 2));
   await context.close();
 } finally { await browser.close(); }

@@ -1,5 +1,23 @@
 const MAX_PIXELS = 2073600;
 const MAX_MESSAGE = 12 * 1024 * 1024;
+const MAX_FPS = 30;
+
+export class ObserverMeter {
+  constructor(now) { this.maxFps = 0; this.reset(now, 0, 0); }
+  reset(now, bytes, frames) {
+    this.time = now; this.bytes = bytes; this.frames = frames;
+    return { fps: 0, maxFps: this.maxFps, kbps: 0 };
+  }
+  sample(now, bytes, frames) {
+    const elapsed = now - this.time;
+    if (elapsed <= 0) return { fps: 0, maxFps: this.maxFps, kbps: 0 };
+    const fps = Math.min(MAX_FPS, Math.max(0, frames - this.frames) * 1000 / elapsed);
+    const kbps = Math.max(0, bytes - this.bytes) / elapsed;
+    this.maxFps = Math.max(this.maxFps, fps);
+    this.time = now; this.bytes = bytes; this.frames = frames;
+    return { fps, maxFps: this.maxFps, kbps };
+  }
+}
 const integer = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
 const sequence = (v) => typeof v === "string" && /^[1-9][0-9]{0,19}$/.test(v) && BigInt(v) <= 18446744073709551615n;
 const uuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -77,12 +95,32 @@ if (typeof document !== "undefined") {
   const canvas = document.getElementById("mirror"), empty = document.getElementById("empty");
   let socket, generation = 0, welcome = null, lastSeq = null, disposed = false;
   let bytes = 0, frames = 0, retry = 0, retryTimer, queue = Promise.resolve(), queued = 0;
+  let health = "warning";
+  const meter = new ObserverMeter(performance.now());
   const text = (id, value) => { document.getElementById(id).textContent = value; };
-  const formatBytes = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(2)} MiB`;
+  const formatBytes = (n) => n < 1000 ? `${n} B` : n < 1000000 ? `${(n / 1000).toFixed(1)} KB` : `${(n / 1000000).toFixed(2)} MB`;
+  const renderMeter = ({ fps, maxFps, kbps }) => {
+    text("fps", fps.toFixed(1)); text("fps-max", maxFps.toFixed(1));
+    document.getElementById("fps-fill").style.transform = `scaleX(${fps / MAX_FPS})`;
+    const progress = document.getElementById("fps-meter");
+    progress.setAttribute("aria-valuenow", fps.toFixed(1));
+    progress.setAttribute("aria-valuetext", `${fps.toFixed(1)} FPS; sampled max ${maxFps.toFixed(1)}; ceiling ${MAX_FPS}`);
+    const transfer = `${kbps.toFixed(1)} KB/s`;
+    text("transfer", transfer); text("transfer-live", transfer);
+  };
+  const resetMeter = () => renderMeter(meter.reset(performance.now(), bytes, frames));
+  const setStatus = (level, label, message = "") => {
+    health = level;
+    const indicator = document.getElementById("connection"), notice = document.getElementById("error");
+    indicator.dataset.health = level; indicator.title = message || label;
+    text("status", label); notice.dataset.health = level; notice.textContent = message; notice.hidden = !message;
+  };
   const send = (message) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
   const invalidate = () => { generation++; welcome = null; lastSeq = null; };
   const clear = () => { canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); empty.hidden = false; };
-  const recover = (error) => { text("error", error.message); invalidate(); clear(); send({ type: "resync" }); };
+  const recover = (error) => {
+    setStatus("warning", "Syncing", error.message); invalidate(); clear(); resetMeter(); send({ type: "resync" });
+  };
 
   async function apply(batch, receivedGeneration) {
     const { header: h, buffer, payloadStart } = batch;
@@ -118,17 +156,26 @@ if (typeof document !== "undefined") {
       target.drawImage(stage, 0, 0);
       lastSeq = h.seq; empty.hidden = true; frames++; retry = 0;
       send({ type: "ack", epoch: h.epoch, seq: h.seq });
-      text("status", "Connected"); text("error", ""); text("dimensions", `${h.width} x ${h.height}`);
-      text("batch", `${h.type} #${h.seq} / ${h.blocks.length} blocks / ${formatBytes(buffer.byteLength)}`);
-      text("timing", `${(performance.now() - started).toFixed(1)} ms`);
+      const elapsed = performance.now() - started;
+      if (elapsed > 1000 / MAX_FPS) setStatus("warning", "Slow draw", `Decode + draw: ${elapsed.toFixed(1)} ms exceeds the 30 FPS frame budget.`);
+      else setStatus("normal", "Connected");
+      text("dimensions", `${h.width} x ${h.height}`);
+      text("batch", `${h.type} #${h.seq}`);
+      const unit = h.type === "full" ? "image" : h.blocks.length === 1 ? "tile" : "tiles";
+      text("batch-detail", `${h.blocks.length} ${unit} / ${formatBytes(buffer.byteLength)}`);
+      text("timing", `${elapsed.toFixed(1)} ms`);
     } finally { decoded.forEach((image) => image?.close?.()); }
   }
 
   function connect() {
     if (disposed || document.hidden) return;
-    invalidate(); text("status", retry ? "Reconnecting" : "Connecting");
+    invalidate(); resetMeter(); setStatus("warning", retry ? "Reconnecting" : "Connecting");
     const ws = new WebSocket(`ws://${location.host}/stream`); socket = ws; ws.binaryType = "arraybuffer";
-    ws.onopen = () => { if (document.hidden) send({ type: "pause" }); else send({ type: "subscribe", v: 1 }); };
+    ws.onopen = () => {
+      if (ws !== socket || disposed) return;
+      if (document.hidden) { send({ type: "pause" }); setStatus("warning", "Paused"); }
+      else { setStatus("warning", "Syncing"); send({ type: "subscribe", v: 1 }); }
+    };
     ws.onmessage = (event) => {
       if (ws !== socket || disposed) return;
       bytes += typeof event.data === "string" ? new TextEncoder().encode(event.data).byteLength : event.data.byteLength;
@@ -142,8 +189,8 @@ if (typeof document !== "undefined") {
                   message.width * message.height > MAX_PIXELS || message.tileSize !== 128 || message.codec !== "png") throw Error("Invalid welcome");
               invalidate(); welcome = message; break;
             case "ping": if (typeof message.nonce === "string" && message.nonce.length <= 64) send({ type: "pong", nonce: message.nonce }); break;
-            case "error": invalidate(); clear(); text("status", "Error"); text("error", String(message.message)); break;
-            case "state": text("status", "Connected"); break;
+            case "error": invalidate(); clear(); resetMeter(); setStatus("error", "Error", String(message.message)); break;
+            case "state": setStatus("warning", "Syncing"); break;
             default: throw Error("Unknown server message");
           }
         } else {
@@ -153,27 +200,35 @@ if (typeof document !== "undefined") {
         }
       } catch (error) { recover(error); }
     };
-    ws.onerror = () => text("error", "WebSocket connection failed");
+    ws.onerror = () => { if (ws === socket) setStatus("error", "Error", "WebSocket connection failed"); };
     ws.onclose = () => {
       if (ws !== socket) return;
-      invalidate(); clear(); text("status", "Disconnected");
+      invalidate(); clear(); resetMeter();
+      setStatus("error", "Disconnected", document.getElementById("error").textContent || "WebSocket disconnected; reconnecting.");
       if (!disposed && !document.hidden) {
         const delays = [1000, 2000, 4000, 8000, 15000];
         retryTimer = setTimeout(connect, delays[Math.min(retry++, delays.length - 1)]);
       }
     };
   }
-  canvas.addEventListener("contextlost", (event) => { event.preventDefault(); invalidate(); text("error", "Canvas context lost"); });
+  canvas.addEventListener("contextlost", (event) => {
+    event.preventDefault(); invalidate(); resetMeter(); setStatus("error", "Error", "Canvas context lost");
+  });
   canvas.addEventListener("contextrestored", () => recover(Error("Canvas restored; refreshing")));
   document.addEventListener("visibilitychange", () => {
-    clearTimeout(retryTimer); invalidate();
-    if (document.hidden) { send({ type: "pause" }); text("status", "Paused"); }
-    else if (socket?.readyState === WebSocket.OPEN) send({ type: "resume" });
+    clearTimeout(retryTimer); invalidate(); resetMeter();
+    if (document.hidden) { send({ type: "pause" }); setStatus("warning", "Paused"); }
+    else if (socket?.readyState === WebSocket.OPEN) { setStatus("warning", "Syncing"); send({ type: "resume" }); }
     else connect();
   });
-  window.addEventListener("pagehide", () => { disposed = true; clearTimeout(retryTimer); invalidate(); send({ type: "pause" }); socket?.close(); clear(); });
+  window.addEventListener("pagehide", () => {
+    disposed = true; clearTimeout(retryTimer); invalidate(); resetMeter(); send({ type: "pause" }); socket?.close(); clear();
+  });
   window.addEventListener("pageshow", (event) => { if (event.persisted) { disposed = false; connect(); } });
-  let fpsTime = performance.now();
-  setInterval(() => { const now = performance.now(); text("fps", (frames * 1000 / (now - fpsTime)).toFixed(1)); frames = 0; fpsTime = now; }, 1000);
+  setInterval(() => {
+    if (disposed || document.hidden) return;
+    const sample = meter.sample(performance.now(), bytes, frames);
+    renderMeter(health === "error" ? { ...sample, fps: 0 } : sample);
+  }, 1000);
   connect();
 }
