@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const url = process.argv[2] || 'http://127.0.0.1:33841/';
 const output = process.env.OBSERVER_SCREENSHOTS || '/private/tmp/terminal-mac-observer-screenshots';
+const ceiling = process.env.OBSERVER_BROWSER_LOW === '1' ? 10 : 30;
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 try {
@@ -43,7 +44,7 @@ try {
   await context.addInitScript(() => {
     const original = window.createImageBitmap;
     window.createImageBitmap = async (...args) => {
-      if (window.__slowDecode) await new Promise((resolve) => setTimeout(resolve, 80));
+      if (window.__slowDecode) await new Promise((resolve) => setTimeout(resolve, 150));
       return original(...args);
     };
   });
@@ -60,13 +61,13 @@ try {
     ceiling: document.getElementById('fps-meter').getAttribute('aria-valuemax')
   }));
   assert.ok(meters.fps <= meters.max && meters.max <= 30);
-  assert.equal(meters.ceiling, '30'); assert.equal(meters.rate, meters.liveRate);
+  assert.equal(meters.ceiling, String(ceiling)); assert.equal(meters.rate, meters.liveRate);
   const oracle = async () => page.evaluate(() => {
     const canvas = document.getElementById('mirror'), pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     let mismatches = 0;
     const value = pixels[0];
-    for (let y = 0; y < 400; y++) for (let x = 0; x < 640; x++) {
-      const i = (y * 640 + x) * 4, changed = (x < 32 && y < 32) || (x >= 512 && y >= 384);
+    for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4, changed = (x < 32 && y < 32) || (x >= canvas.width - 128 && y >= canvas.height - 16);
       if (pixels[i] !== (changed ? value : 240) || pixels[i + 1] !== (changed ? 32 : 245) ||
           pixels[i + 2] !== (changed ? 64 : 250) || pixels[i + 3] !== 255) mismatches++;
     }
@@ -79,6 +80,25 @@ try {
   await other.waitForFunction(() => document.getElementById('empty').hidden);
   assert.equal((await oracle()).mismatches, 0);
   await other.close();
+  const toggle = page.getByRole('switch', { name: 'Low bitrate' });
+  const assertMode = async (target, low) => {
+    await target.waitForFunction((low) => document.getElementById('low-bandwidth').checked === low &&
+      document.getElementById('mirror').width === (low ? 480 : 640) && document.getElementById('empty').hidden &&
+      document.getElementById('fps-meter').getAttribute('aria-valuemax') === (low ? '10' : '30'), low);
+  };
+  await toggle.setChecked(true);
+  await assertMode(page, true);
+  assert.equal((await oracle()).mismatches, 0);
+  const synced = await context.newPage(); await synced.goto(url);
+  await assertMode(synced, true);
+  await page.reload(); await assertMode(page, true);
+  await synced.getByRole('switch', { name: 'Low bitrate' }).uncheck();
+  await assertMode(synced, false); await assertMode(page, false);
+  assert.equal((await oracle()).mismatches, 0);
+  await synced.close();
+  // Restore the fixture's starting profile before the remaining regressions.
+  await toggle.setChecked(ceiling === 10);
+  await assertMode(page, ceiling === 10);
   await page.evaluate(() => { window.__slowDecode = true; });
   await page.waitForFunction(() => document.getElementById('connection').dataset.health === 'warning' &&
     document.getElementById('status').textContent === 'Slow draw');
@@ -129,6 +149,7 @@ try {
       const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
       const debug = rect('.debug'), desktop = rect('.desktop'), screen = rect('.screen'), camera = rect('.camera');
       const debugTitle = rect('#debug-title'), desktopTitle = rect('#desktop-title'), bar = rect('.stream-bar');
+      const mode = rect('.low-bandwidth');
       const elements = [...document.querySelectorAll('header, .mirror, .debug, dd, pre')];
       return { width: document.documentElement.scrollWidth, viewport: innerWidth,
         overflow: elements.some((element) => element.scrollWidth > element.clientWidth + 1),
@@ -136,6 +157,7 @@ try {
         desktopBelow: desktop.top > debug.bottom, desktopInside: desktop.bottom <= screen.bottom - 20,
         bottomSpace: screen.bottom - desktop.bottom, compactDebug: debug.height <= 220,
         titleOutside: debugTitle.bottom <= debug.top,
+        switchFits: mode.left >= debugTitle.right && mode.right <= debug.right && mode.bottom <= debug.top,
         centeredTitles: Math.abs(debugTitle.x + debugTitle.width / 2 - debug.x - debug.width / 2) < 1 &&
           Math.abs(desktopTitle.x + desktopTitle.width / 2 - bar.x - bar.width / 2) < 1,
         singleLineHeader: bar.height === 20 };
@@ -143,9 +165,14 @@ try {
     assert.ok(layout.width <= layout.viewport); assert.equal(layout.overflow, false);
     assert.ok(layout.debugInside && layout.desktopBelow && layout.desktopInside);
     assert.ok(layout.titleOutside && layout.centeredTitles && layout.singleLineHeader && layout.compactDebug);
+    assert.ok(layout.switchFits);
     assert.ok(layout.bottomSpace >= 50);
     layouts.push(layout);
     await page.screenshot({ path: `${output}/debug-${viewport.width}.png`, fullPage: true });
+    await toggle.check(); await assertMode(page, true);
+    assert.equal((await oracle()).mismatches, 0);
+    await page.screenshot({ path: `${output}/low-${viewport.width}.png`, fullPage: true });
+    await toggle.setChecked(ceiling === 10); await assertMode(page, ceiling === 10);
   }
   assert.equal(await page.locator('#debug-title').textContent(), 'Debug');
   assert.equal(await page.locator('#desktop-title').textContent(), 'MacOS');

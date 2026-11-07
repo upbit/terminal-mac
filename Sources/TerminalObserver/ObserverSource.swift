@@ -14,19 +14,36 @@ public struct ObserverCaptureResult {
 }
 
 public protocol ObserverSource: Sendable {
+    func configure(lowBandwidth: Bool, maxFPS: Int) async throws
     func next() async throws -> ObserverCaptureResult?
     func close() async
 }
 
 public actor GuestObserverSource: ObserverSource {
     private let directory: URL
-    private let width: Int
+    private let standardWidth: Int
+    private var width: Int
+    private var maxFPS: Int
+    private let showsCursor: Bool
     private var mailbox: Mailbox?
     private var lease: String?, epoch = "", sequence: UInt64 = 0
     private var statusChecked = Date.distantPast
-    public init(directory: URL, width: Int = 640) { self.directory = directory; self.width = width }
+    private var nextPoll: Double = 0
+    public init(directory: URL, width: Int = 640, maxFPS: Int = 30, showsCursor: Bool = true) {
+        precondition((1...30).contains(maxFPS))
+        self.directory = directory; self.standardWidth = width; self.width = width
+        self.maxFPS = maxFPS; self.showsCursor = showsCursor
+    }
+
+    public func configure(lowBandwidth: Bool, maxFPS: Int) async throws {
+        guard lease == nil, (1...30).contains(maxFPS) else { throw Failure("Observer must close before reconfiguration") }
+        width = lowBandwidth ? min(480, standardWidth) : standardWidth
+        self.maxFPS = maxFPS; nextPoll = 0
+    }
 
     public func next() async throws -> ObserverCaptureResult? {
+        let delay = nextPoll - ProcessInfo.processInfo.systemUptime
+        if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
         let fd = open(directory.appendingPathComponent("runtime.lock").path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw Failure("VM is stopped") }
         let locked = flock(fd, LOCK_EX | LOCK_NB) != 0
@@ -45,13 +62,21 @@ public actor GuestObserverSource: ObserverSource {
         if lease == nil {
             let capabilities = try await mailbox.call(Request(action: "observe.capabilities", timeout: 2))
             guard capabilities.values["observeVersion"] == "1" else { throw Failure("Upgrade the Guest helper: observer protocol v1 is required") }
-            let reply = try await mailbox.call(Request(action: "observe.open", arguments: ["width": String(width)], timeout: 5))
+            var arguments = ["width": String(width)]
+            if maxFPS != 30 || !showsCursor {
+                guard capabilities.values["captureOptions"] == "1" else {
+                    throw Failure("Upgrade the Guest helper: observer rate/cursor options are required")
+                }
+                arguments["maxFps"] = String(maxFPS); arguments["cursor"] = showsCursor ? "show" : "hide"
+            }
+            let reply = try await mailbox.call(Request(action: "observe.open", arguments: arguments, timeout: 5))
             guard let lease = reply.values["lease"], UUID(uuidString: lease) != nil,
                   let epoch = reply.values["epoch"], UUID(uuidString: epoch) != nil else { throw Failure("Invalid observer open reply") }
             self.lease = lease; self.epoch = epoch; sequence = 0
         }
         let lease = self.lease!
         let request = Request(action: "observe.poll", arguments: ["lease": lease, "epoch": epoch, "after": String(sequence), "wait": "1000"], timeout: 3)
+        nextPoll = ProcessInfo.processInfo.systemUptime + 1 / Double(maxFPS)
         let filename = "observe-\(lease)-\(request.id.uuidString).bin"
         defer { mailbox.remove(filename) }
         let reply = try await mailbox.call(request).values
@@ -81,7 +106,7 @@ public actor GuestObserverSource: ObserverSource {
         return ObserverCaptureResult(epoch: epoch, pixels: rgba, grid: grid, tiles: candidates)
     }
     public func close() async {
-        let lease = self.lease; self.lease = nil; sequence = 0; epoch = ""; statusChecked = .distantPast
+        let lease = self.lease; self.lease = nil; sequence = 0; epoch = ""; statusChecked = .distantPast; nextPoll = 0
         if let lease, let mailbox {
             // Cleanup must reach the Guest even when the polling task was cancelled.
             await Task.detached {

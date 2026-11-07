@@ -20,6 +20,44 @@ final class ObserverTests: XCTestCase {
         XCTAssertThrowsError(try ObserverGrid(width: Int.max, height: 2))
         XCTAssertThrowsError(try ObserverGrid(width: 1920, height: 2160))
     }
+    func testSmallGridAndNativeTileRemapping() throws {
+        let small = try ObserverGrid(width: 640, height: 400, tileSize: 64)
+        XCTAssertEqual(small.count, 70)
+        XCTAssertEqual(small.rect(69), ObserverRect(x: 576, y: 384, w: 64, h: 16))
+        let native = try ObserverGrid(width: 640, height: 400)
+        XCTAssertEqual(try small.tiles(intersecting: native.rect(0)), [0, 1, 10, 11])
+        XCTAssertEqual(try small.tiles(intersecting: native.rect(19)), [68, 69])
+        XCTAssertThrowsError(try ObserverGrid(width: 640, height: 400, tileSize: 96))
+    }
+    func testPacerUsesActualBytesAndDoesNotBankIdleCredit() {
+        var pacer = ObserverPacer(maxFPS: 10, bytesPerSecond: 180_000)
+        XCTAssertEqual(pacer.delay(at: 0), 0)
+        pacer.sent(bytes: 360_000, at: 0)
+        XCTAssertEqual(pacer.delay(at: 0.5), 1.5, accuracy: 0.0001)
+        XCTAssertEqual(pacer.delay(at: 2), 0)
+        pacer.sent(bytes: 1800, at: 100)
+        XCTAssertEqual(pacer.delay(at: 100), 0.1, accuracy: 0.0001)
+        pacer.sent(bytes: 90_000, at: 100.1)
+        XCTAssertEqual(pacer.nextSend, 100.6, accuracy: 0.0001)
+    }
+    func testPacerLongRunBudgetIncludingLargeRefreshes() {
+        var pacer = ObserverPacer(maxFPS: 10, bytesPerSecond: 180_000)
+        var bytes = 0, now = 0.0
+        for n in 0..<100 {
+            now += pacer.delay(at: now)
+            let size = n % 7 == 0 ? 360_000 : 15_000
+            bytes += size; pacer.sent(bytes: size, at: now)
+        }
+        XCTAssertLessThanOrEqual(Double(bytes) / pacer.nextSend, 180_000.001)
+    }
+    func testChangingModePreservesPacerDebt() {
+        var pacer = ObserverPacer(maxFPS: 10, bytesPerSecond: 180_000)
+        pacer.sent(bytes: 360_000, at: 10)
+        pacer.configure(maxFPS: 30, bytesPerSecond: nil)
+        XCTAssertEqual(pacer.delay(at: 10), 2)
+        pacer.configure(maxFPS: 10, bytesPerSecond: 180_000)
+        XCTAssertEqual(pacer.delay(at: 11), 1)
+    }
     func testDirtyHistoryAccumulatesSkippedFramesAndFallbacks() {
         var history = ObserverDirtyHistory()
         history.append(seq: 1, tiles: nil)

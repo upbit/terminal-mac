@@ -9,6 +9,12 @@ import TerminalMacCore
 actor TestObserverSource: ObserverSource {
     var pending: ObserverCaptureResult?
     var calls = 0, closes = 0
+    var lowBandwidth = false
+    var maxFPS = 30
+    func configure(lowBandwidth: Bool, maxFPS: Int) {
+        if lowBandwidth != self.lowBandwidth { pending = nil }
+        self.lowBandwidth = lowBandwidth; self.maxFPS = maxFPS
+    }
     func set(_ frame: ObserverCaptureResult) { pending = frame }
     func next() async throws -> ObserverCaptureResult? {
         calls += 1
@@ -20,6 +26,50 @@ actor TestObserverSource: ObserverSource {
 }
 
 final class ObserverTransportTests: XCTestCase {
+    func testGuestModeReopensAt480AndRestores640() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("observer-mode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lock = try FileLock(directory.appendingPathComponent("runtime.lock"))
+        let host = try Mailbox(directory.appendingPathComponent("host-control"), create: true)
+        let guest = try Mailbox(directory.appendingPathComponent("exchange"), create: true)
+        let transport = Task {
+            var opens = 0, closes = 0, epoch = ""
+            while !Task.isCancelled && closes < 3 {
+                for request in try host.requests() { try host.respond(Reply(id: request.id, values: ["state": "running"])) }
+                for request in try guest.requests() {
+                    var values: [String: String] = [:]
+                    switch request.action {
+                    case "observe.capabilities": values = ["observeVersion": "1", "captureOptions": "1"]
+                    case "observe.open":
+                        XCTAssertEqual(opens, closes, "Previous lease must be closed before reopening")
+                        XCTAssertEqual(request.arguments["width"], opens == 1 ? "480" : "640")
+                        XCTAssertEqual(request.arguments["maxFps"], opens == 1 ? "10" : nil)
+                        epoch = UUID().uuidString
+                        values = ["lease": UUID().uuidString, "epoch": epoch]; opens += 1
+                    case "observe.poll": values = ["epoch": epoch, "unchanged": "true"]
+                    case "observe.close": closes += 1
+                    default: XCTFail("Unexpected action")
+                    }
+                    try guest.respond(Reply(id: request.id, values: values))
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            return opens
+        }
+        let source = GuestObserverSource(directory: directory)
+        do {
+            for low in [false, true, false] {
+                try await source.configure(lowBandwidth: low, maxFPS: low ? 10 : 30)
+                _ = try await source.next()
+                do { try await source.configure(lowBandwidth: !low, maxFPS: 10); XCTFail("Changed a live lease") }
+                catch {}
+                await source.close()
+            }
+            let count = try await transport.value; XCTAssertEqual(count, 3)
+        } catch { transport.cancel(); await source.close(); throw error }
+        withExtendedLifetime(lock) {}
+    }
     func testGuestMailboxSourceNegotiationPollingAndCleanup() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("observer-source-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -35,9 +85,12 @@ final class ObserverTransportTests: XCTestCase {
                 for request in try guest.requests() {
                     var values: [String: String] = [:]
                     switch request.action {
-                    case "observe.capabilities": values = ["observeVersion": "1"]
+                    case "observe.capabilities": values = ["observeVersion": "1", "captureOptions": "1"]
                     case "observe.open":
-                        XCTAssertEqual(request.arguments["width"], "640"); values = ["lease": lease, "epoch": epoch]
+                        XCTAssertEqual(request.arguments["width"], "640")
+                        XCTAssertEqual(request.arguments["maxFps"], "10")
+                        XCTAssertEqual(request.arguments["cursor"], "hide")
+                        values = ["lease": lease, "epoch": epoch]
                     case "observe.poll":
                         XCTAssertEqual(request.arguments["lease"], lease); XCTAssertEqual(request.arguments["epoch"], epoch)
                         XCTAssertEqual(request.arguments["after"], String(poll))
@@ -57,7 +110,7 @@ final class ObserverTransportTests: XCTestCase {
                 try await Task.sleep(nanoseconds: 1_000_000)
             }
         }
-        let source = GuestObserverSource(directory: directory)
+        let source = GuestObserverSource(directory: directory, maxFPS: 10, showsCursor: false)
         do {
             let firstResult = try await source.next(), first = try XCTUnwrap(firstResult)
             XCTAssertNil(first.tiles); XCTAssertEqual(first.pixels[0], 1); XCTAssertEqual(first.pixels[3], 255)
@@ -111,6 +164,30 @@ final class ObserverTransportTests: XCTestCase {
         } catch { motion.cancel(); await source.close(); throw error }
         withExtendedLifetime(observerLock) {}
     }
+    func testOldHelperRejectsLowModeBeforeOpeningLease() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("observer-old-helper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lock = try FileLock(directory.appendingPathComponent("runtime.lock"))
+        let host = try Mailbox(directory.appendingPathComponent("host-control"), create: true)
+        let guest = try Mailbox(directory.appendingPathComponent("exchange"), create: true)
+        let transport = Task {
+            while !Task.isCancelled {
+                for request in try host.requests() { try host.respond(Reply(id: request.id, values: ["state": "running"])) }
+                for request in try guest.requests() {
+                    XCTAssertEqual(request.action, "observe.capabilities", "Must not silently open a 30 FPS cursor-enabled stream")
+                    try guest.respond(Reply(id: request.id, values: ["observeVersion": "1"]))
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+        let source = GuestObserverSource(directory: directory, maxFPS: 10, showsCursor: false)
+        do { _ = try await source.next(); XCTFail("Old helper accepted low mode") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Upgrade the Guest helper")) }
+        transport.cancel(); _ = try await transport.value
+        await source.close()
+        withExtendedLifetime(lock) {}
+    }
     func testInvalidOriginAndReadOnlyRouteDoNotCapture() async throws {
         let source = TestObserverSource(), server = ObserverServer(source: source)
         let port = try await server.start()
@@ -132,25 +209,92 @@ final class ObserverTransportTests: XCTestCase {
         guard let raw = ProcessInfo.processInfo.environment["OBSERVER_BROWSER_PORT"], let port = Int(raw) else {
             throw XCTSkip("Set OBSERVER_BROWSER_PORT to run the browser fixture server")
         }
-        let source = TestObserverSource(), server = ObserverServer(source: source)
+        let small = ProcessInfo.processInfo.environment["OBSERVER_BROWSER_LOW"] == "1"
+        let configuration = try ObserverConfiguration(maxFPS: small ? 10 : 30, bytesPerSecond: small ? 180_000 : nil,
+                                                       tileSize: small ? 64 : 128, pngPolicy: small ? .adaptive : .threshold(40))
+        let source = TestObserverSource(), server = ObserverServer(source: source, configuration: configuration, lowBandwidth: small)
         let actual = try await server.start(port: port)
         print("Browser fixture: http://127.0.0.1:\(actual)/")
-        let grid = try ObserverGrid(width: 640, height: 400), epoch = UUID().uuidString
+        let epoch = UUID().uuidString
         let duration = Int(ProcessInfo.processInfo.environment["OBSERVER_BROWSER_SECONDS"] ?? "60") ?? 60
         do {
             for n in 0..<(duration * 2) {
+                let low = await source.lowBandwidth
+                let grid = try ObserverGrid(width: low ? 480 : 640, height: low ? 300 : 400)
                 var pixels = Data(count: grid.width * grid.height * 4)
                 for y in 0..<grid.height { for x in 0..<grid.width {
                     let d = (y * grid.width + x) * 4
-                    let changed = (x < 32 && y < 32) || (x >= 512 && y >= 384)
+                    let changed = (x < 32 && y < 32) || (x >= grid.width - 128 && y >= grid.height - 16)
                     pixels[d] = changed ? UInt8(n % 200) : 240
                     pixels[d + 1] = changed ? 32 : 245; pixels[d + 2] = changed ? 64 : 250; pixels[d + 3] = 255
                 } }
-                await source.set(ObserverCaptureResult(epoch: epoch, pixels: pixels, grid: grid, tiles: [0, 19]))
+                await source.set(ObserverCaptureResult(epoch: epoch, pixels: pixels, grid: grid, tiles: nil))
                 try await Task.sleep(nanoseconds: 500_000_000)
             }
         } catch { await server.stop(); throw error }
         await server.stop()
+    }
+    func testBudgetWakeFlushesLastChangeAndResyncDoesNotResetDebt() async throws {
+        let config = try ObserverConfiguration(maxFPS: 2, bytesPerSecond: 180_000, tileSize: 64, pngPolicy: .adaptive)
+        let source = TestObserverSource(), server = ObserverServer(source: source, configuration: config)
+        let port = try await server.start()
+        do {
+            var request = URLRequest(url: URL(string: "ws://127.0.0.1:\(port)/stream")!)
+            request.setValue("http://127.0.0.1:\(port)", forHTTPHeaderField: "Origin")
+            let session = URLSession(configuration: .ephemeral), socket = session.webSocketTask(with: request)
+            socket.resume()
+            defer { socket.cancel(with: .normalClosure, reason: nil); session.invalidateAndCancel() }
+            let grid = try ObserverGrid(width: 640, height: 400), epoch = UUID().uuidString
+            var pixels = Data(repeating: 255, count: 640 * 400 * 4)
+            await source.set(ObserverCaptureResult(epoch: epoch, pixels: pixels, grid: grid, tiles: nil))
+            try await socket.send(.string("{\"type\":\"subscribe\",\"v\":1}"))
+            let (full, _) = try parse(await receiveImage(socket)), start = ProcessInfo.processInfo.systemUptime
+            let ack = ["type": "ack", "epoch": full["epoch"] as! String, "seq": "1"]
+            try await socket.send(.string(String(decoding: JSONSerialization.data(withJSONObject: ack), as: UTF8.self)))
+            pixels[0] = 0
+            await source.set(ObserverCaptureResult(epoch: epoch, pixels: pixels, grid: grid, tiles: [0]))
+            let (delta, _) = try parse(await receiveImage(socket))
+            XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - start, 0.43)
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.95, "Must wake before the 1s maintenance timer")
+            XCTAssertEqual(delta["type"] as? String, "delta")
+            XCTAssertEqual(delta["tileSize"] as? Int, 64)
+            XCTAssertEqual((delta["blocks"] as? [[String: Any]])?.first?["w"] as? Int, 64)
+            let beforeResync = ProcessInfo.processInfo.systemUptime
+            try await socket.send(.string("{\"type\":\"resync\"}"))
+            let (refresh, _) = try parse(await receiveImage(socket))
+            XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - beforeResync, 0.43)
+            XCTAssertEqual(refresh["type"] as? String, "full")
+            XCTAssertNotEqual(refresh["epoch"] as? String, full["epoch"] as? String)
+        } catch { await server.stop(); throw error }
+        await server.stop()
+    }
+    func testAdaptivePNGChoosesSmallerEnvelopeAndCapsBlocks() throws {
+        let grid = try ObserverGrid(width: 640, height: 400, tileSize: 64)
+        var pixels = Data(repeating: 255, count: 640 * 400 * 4)
+        let initial = try ObserverPixels(grid: grid, rgba: pixels, previous: nil, candidates: nil)
+        var client = ObserverClient()
+        let first = try XCTUnwrap(client.reserve(initial))
+        try client.acknowledge(epoch: first.epoch, seq: first.seq)
+        for y in 0..<192 { for x in 0..<640 { pixels[(y * 640 + x) * 4] = 0 } }
+        let next = try ObserverPixels(grid: grid, rgba: pixels, previous: initial, candidates: nil)
+        let batch = try XCTUnwrap(client.reserve(next))
+        let adaptive = try ObserverPNG.batch(batch, policy: .adaptive)
+        XCTAssertLessThanOrEqual(adaptive.count, try ObserverPNG.batch(batch, policy: .threshold(100)).count)
+        XCTAssertLessThanOrEqual(adaptive.count, try ObserverPNG.batch(batch, policy: .threshold(1)).count)
+        let largeGrid = try ObserverGrid(width: 1280, height: 960, tileSize: 64)
+        var largePixels = Data(repeating: 255, count: 1280 * 960 * 4)
+        let before = try ObserverPixels(grid: largeGrid, rgba: largePixels, previous: nil, candidates: nil)
+        var largeClient = ObserverClient()
+        let full = try XCTUnwrap(largeClient.reserve(before))
+        try largeClient.acknowledge(epoch: full.epoch, seq: full.seq)
+        for tile in 0..<257 { let rect = largeGrid.rect(tile); largePixels[(rect.y * 1280 + rect.x) * 4] = 0 }
+        let after = try ObserverPixels(grid: largeGrid, rgba: largePixels, previous: before, candidates: nil)
+        let many = try XCTUnwrap(largeClient.reserve(after))
+        let (header, _) = try parse(ObserverPNG.batch(many, policy: .adaptive))
+        XCTAssertEqual(header["type"] as? String, "full")
+        XCTAssertEqual((header["blocks"] as? [Any])?.count, 1)
+        XCTAssertThrowsError(try ObserverConfiguration(tileSize: 96))
+        XCTAssertThrowsError(try ObserverConfiguration(pngPolicy: .threshold(0)))
     }
     func testBoundedLZ4DecodeAndStride() throws {
         let grid = try ObserverGrid(width: 2, height: 2)

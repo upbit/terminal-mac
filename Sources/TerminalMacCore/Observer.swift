@@ -15,18 +15,19 @@ public struct ObserverRect: Codable, Equatable {
 
 public struct ObserverGrid: Equatable {
     public let width: Int, height: Int
-    public var columns: Int { (width + 127) / 128 }
-    public var rows: Int { (height + 127) / 128 }
+    public let tileSize: Int
+    public var columns: Int { (width + tileSize - 1) / tileSize }
+    public var rows: Int { (height + tileSize - 1) / tileSize }
     public var count: Int { columns * rows }
     public var all: Set<Int> { Set(0..<count) }
-    public init(width: Int, height: Int) throws {
+    public init(width: Int, height: Int, tileSize: Int = 128) throws {
         guard (2...1920).contains(width), (2...2160).contains(height),
-              width * height <= ObserverLimits.maxPixels else { throw Failure("Invalid observer image dimensions") }
-        self.width = width; self.height = height
+              width * height <= ObserverLimits.maxPixels, [64, 128].contains(tileSize) else { throw Failure("Invalid observer image dimensions or tile size") }
+        self.width = width; self.height = height; self.tileSize = tileSize
     }
     public func rect(_ index: Int) -> ObserverRect {
-        let x = (index % columns) * 128, y = (index / columns) * 128
-        return ObserverRect(x: x, y: y, w: min(128, width - x), h: min(128, height - y))
+        let x = (index % columns) * tileSize, y = (index / columns) * tileSize
+        return ObserverRect(x: x, y: y, w: min(tileSize, width - x), h: min(tileSize, height - y))
     }
     public func tiles(intersecting rect: ObserverRect) throws -> Set<Int> {
         guard rect.x >= 0, rect.y >= 0, rect.w > 0, rect.h > 0,
@@ -34,8 +35,8 @@ public struct ObserverGrid: Equatable {
             throw Failure("Invalid observer dirty rectangle")
         }
         var result = Set<Int>()
-        for row in (rect.y / 128)...((rect.y + rect.h - 1) / 128) {
-            for column in (rect.x / 128)...((rect.x + rect.w - 1) / 128) { result.insert(row * columns + column) }
+        for row in (rect.y / tileSize)...((rect.y + rect.h - 1) / tileSize) {
+            for column in (rect.x / tileSize)...((rect.x + rect.w - 1) / tileSize) { result.insert(row * columns + column) }
         }
         return result
     }
@@ -150,12 +151,14 @@ public struct ObserverHeader: Encodable {
     public let type: String, epoch: String, seq: String
     public let baseSeq: String?
     public let width: Int, height: Int
+    public let tileSize: Int
     public let codec = "png"
     public let blocks: [ObserverBlock]
     public init(batch: ObserverBatch, full: Bool, blocks: [ObserverBlock]) {
         type = full ? "full" : "delta"; epoch = batch.epoch; seq = String(batch.seq)
         baseSeq = full ? nil : batch.baseSeq.map(String.init)
-        width = batch.snapshot.grid.width; height = batch.snapshot.grid.height; self.blocks = blocks
+        width = batch.snapshot.grid.width; height = batch.snapshot.grid.height
+        tileSize = batch.snapshot.grid.tileSize; self.blocks = blocks
     }
     public func encode(payload: Data) throws -> Data {
         let header = try JSONEncoder().encode(self)
@@ -166,5 +169,26 @@ public struct ObserverHeader: Encodable {
         var length = UInt32(header.count).bigEndian
         withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
         data.append(header); data.append(payload); return data
+    }
+}
+
+/// No idle credit: one atomic image may burst, then its actual bytes must be repaid.
+/// Keep this state across resync/pause so refreshing cannot evade the byte budget.
+public struct ObserverPacer {
+    public private(set) var maxFPS: Int
+    public private(set) var bytesPerSecond: Int?
+    public private(set) var nextSend: Double = 0
+    public init(maxFPS: Int, bytesPerSecond: Int?) {
+        precondition((1...30).contains(maxFPS) && (bytesPerSecond == nil || bytesPerSecond! > 0))
+        self.maxFPS = maxFPS; self.bytesPerSecond = bytesPerSecond
+    }
+    public func delay(at now: Double) -> Double { max(0, nextSend - now) }
+    public mutating func configure(maxFPS: Int, bytesPerSecond: Int?) {
+        precondition((1...30).contains(maxFPS) && (bytesPerSecond == nil || bytesPerSecond! > 0))
+        self.maxFPS = maxFPS; self.bytesPerSecond = bytesPerSecond
+    }
+    public mutating func sent(bytes: Int, at now: Double) {
+        let interval = max(1 / Double(maxFPS), bytesPerSecond.map { Double(bytes) / Double($0) } ?? 0)
+        nextSend = max(now, nextSend) + interval
     }
 }

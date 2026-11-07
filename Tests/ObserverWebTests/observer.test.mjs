@@ -26,6 +26,13 @@ test('full and partial edge tile validate', () => {
   const edge = { x: 512, y: 384, w: 128, h: 16, offset: 0, length: 57 };
   assert.equal(parseBatch(envelope({ type: 'delta', blocks: [edge] })).header.blocks[0].h, 16);
 });
+test('negotiated 64px tiles retain edge and grid validation', () => {
+  const edge = { x: 576, y: 384, w: 64, h: 16, offset: 0, length: 57 };
+  const options = { type: 'delta', blocks: [edge], mutate: (h) => { h.tileSize = 64; } };
+  assert.equal(parseBatch(envelope(options)).header.tileSize, 64);
+  assert.throws(() => parseBatch(envelope({ ...options, blocks: [{ ...edge, x: 575 }] })));
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.tileSize = 96; } })));
+});
 test('bad message lengths and versions reject before PNG decode', () => {
   assert.throws(() => parseBatch(new ArrayBuffer(11)));
   const data = envelope(); new DataView(data).setUint32(8, 65537); assert.throws(() => parseBatch(data));
@@ -75,4 +82,8 @@ test('pause or reconnect resets the window, not cumulative counters or FPS peak'
 test('duplicate timestamps do not create infinite metrics', () => {
   const meter = new ObserverMeter(1000);
   assert.deepEqual(meter.sample(1000, 1000, 30), { fps: 0, maxFps: 0, kbps: 0 });
+});
+test('low bandwidth meter uses the negotiated FPS ceiling', () => {
+  const meter = new ObserverMeter(0, 10);
+  assert.deepEqual(meter.sample(1000, 180000, 15), { fps: 10, maxFps: 10, kbps: 180 });
 });

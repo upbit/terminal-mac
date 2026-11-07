@@ -135,6 +135,33 @@ and debug errors. The Guest helper needs observer protocol v1 and Screen Recordi
 but not Accessibility. Capture uses a separate stream, up to 30 FPS, with native
 dirtyRects and 128px PNG tiles. Unchanged pixels are not pushed.
 
+The **Low bitrate** switch beside the Debug title changes the live observer from
+640px to 480px wide (proportional height). Turn it off to restore the standard
+capture width. Switching refreshes the full image; it does not resize the VM's
+display or affect terminal capture. All tabs connected to this observer service
+share the setting, including newly opened/reloaded tabs.
+
+To start with the switch already on and optionally hide the cursor, use:
+
+```sh
+./dist/terminal-mac observe default --low-bandwidth --hide-cursor
+```
+
+This keeps lossless output at up to 480px, caps capture/sending at 10 FPS, and paces each
+connection against a 180 KB/s image-message budget. It compares full/delta sizes
+near the crossover instead of always sending full at 40% dirty coverage. Idle
+time does not accumulate burst credit; a large initial or recovery image can
+still exceed a one-second budget and delays subsequent sends. Mouse hiding is
+optional and only affects the observer, not the terminal viewer. An updated Guest
+helper with `captureOptions:1` is required; older helpers report an upgrade error.
+
+`--tile-size 64` is available for comparison, but 128 remains the default: the
+recorded Tripadvisor banner used more bytes and more browser decode work with
+64px tiles. `--max-fps`, `--budget-kbps` (decimal KB/s), and `--full-threshold`
+(fixed percentage, for A/B tests) override the profile. See
+[low-bandwidth measurements](docs/PHONE_OBSERVER_LOW_BANDWIDTH.md) for strategy,
+reproduction commands, results, and limits.
+
 This is loopback HTTP/WS only, not a real-phone or public deployment. There is no
 VM input or lifecycle control. Ctrl+C closes the observer, leaving the VM and
 terminal viewer alone. See [decisions](docs/PHONE_OBSERVER_DECISIONS.md) and

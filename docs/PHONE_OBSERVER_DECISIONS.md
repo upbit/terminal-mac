@@ -4,6 +4,10 @@ This memo supersedes the initial release scope in PHONE_OBSERVER.md for this
 development iteration. The original document remains the broader design baseline,
 not a claim that the release/security/performance matrix has passed.
 
+The opt-in low-bandwidth profile and its measurements are now defined in
+[PHONE_OBSERVER_LOW_BANDWIDTH.md](PHONE_OBSERVER_LOW_BANDWIDTH.md). It supersedes
+the no-deliberate-FPS-reduction decision for that profile only.
+
 ## Agreed Scope
 
 - Explicit `terminal-mac observe [NAME]`, HTTP + WS on 127.0.0.1 only.

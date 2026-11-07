@@ -17,7 +17,7 @@ final class ObserverCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
     private var grid: ObserverGrid?
     @MainActor private var stream: SCStream?
 
-    @MainActor func start(width: Int) async throws {
+    @MainActor func start(width: Int, maxFPS: Int = 30, showsCursor: Bool = true) async throws {
         try GuestGuard.requireVirtualMac()
         guard CGPreflightScreenCaptureAccess() else { throw Failure("Screen Recording is not allowed inside the VM") }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -34,8 +34,8 @@ final class ObserverCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
         let config = SCStreamConfiguration()
         config.width = grid.width; config.height = grid.height
         config.pixelFormat = kCVPixelFormatType_32BGRA; config.colorSpaceName = CGColorSpace.sRGB
-        config.showsCursor = true; config.queueDepth = 4
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        config.showsCursor = showsCursor; config.queueDepth = 4
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(maxFPS))
         let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.stream = stream

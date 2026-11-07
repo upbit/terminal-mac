@@ -23,7 +23,9 @@ public final class ObserverServer: @unchecked Sendable {
     private let hub: ObserverHub
     private let limit = ConnectionLimit()
     private var channel: Channel?
-    public init(source: any ObserverSource) { hub = ObserverHub(source: source) }
+    public init(source: any ObserverSource, configuration: ObserverConfiguration = .standard, lowBandwidth: Bool = false) {
+        hub = ObserverHub(source: source, configuration: configuration, lowBandwidth: lowBandwidth)
+    }
     public func start(port: Int = 0) async throws -> Int {
         let hub = self.hub, limit = self.limit
         let bootstrap = ServerBootstrap(group: group)
@@ -147,7 +149,7 @@ private final class ObserverSocketHandler: ChannelInboundHandler {
             controls += 1
             let bytes = Data(frame.unmaskedData.readableBytesView)
             if let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-               ["subscribe", "resync", "resume", "pause"].contains(object["type"] as? String ?? "") { expensive += 1 }
+               ["subscribe", "resync", "resume", "pause", "mode"].contains(object["type"] as? String ?? "") { expensive += 1 }
             // A 30 FPS consumer sends 30 ACKs/second, plus heartbeat/lifecycle controls.
             guard controls <= 64, expensive <= 4, bytes.count <= ObserverLimits.maxControlBytes else {
                 context.close(promise: nil); return

@@ -25,6 +25,17 @@ main { min-height: 100vh; padding: 28px 16px; display: grid; grid-template-colum
 .debug-section { flex: 0 0 auto; min-width: 0; }
 .debug { padding: 12px 14px; border: 1px solid #d8dfe3; border-radius: 8px; background: #fff; min-width: 0; }
 h1 { font-size: 14px; line-height: 20px; margin: 0 0 8px; font-weight: 600; text-align: center; }
+.debug-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; min-height: 28px; margin-bottom: 8px; }
+.debug-bar h1 { grid-column: 2; margin: 0; }
+.low-bandwidth { grid-column: 3; justify-self: end; position: relative; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; cursor: pointer; white-space: nowrap; font-size: 10px; color: #56616a; }
+.low-bandwidth input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch-track { width: 28px; height: 16px; flex: 0 0 28px; padding: 2px; border-radius: 9px; background: #abb4bb; transition: background-color 160ms ease; pointer-events: none; }
+.switch-track::after { content: ""; display: block; width: 12px; height: 12px; border-radius: 50%; background: #fff; transition: transform 160ms ease; }
+.low-bandwidth input:checked + .switch-track { background: #28966a; }
+.low-bandwidth input:checked + .switch-track::after { transform: translateX(12px); }
+.low-bandwidth input:focus-visible + .switch-track { outline: 2px solid #257aaf; outline-offset: 3px; }
+.low-bandwidth:has(input:disabled) { opacity: 0.5; cursor: wait; }
+.low-bandwidth input:disabled { cursor: wait; }
 .fps-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .metric-label, dt { color: #68737d; font-size: 12px; }
 .fps-value { display: flex; align-items: baseline; gap: 6px; font-variant-numeric: tabular-nums; }
@@ -58,4 +69,4 @@ canvas { display: block; width: 100%; height: auto; }
   .debug { padding: 12px; }
   dl { grid-template-columns: 74px minmax(0, 1fr); gap: 7px 10px; }
 }
-@media (prefers-reduced-motion: reduce) { .fps-fill, .connection-dot { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .fps-fill, .connection-dot, .switch-track, .switch-track::after { transition: none; } }

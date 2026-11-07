@@ -45,6 +45,9 @@ final class GuestRuntime: NSObject {
         NSApp.setActivationPolicy(.regular)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 300), styleMask: [.titled, .miniaturizable], backing: .buffered, defer: false)
         window.title = "terminal-mac guest helper"
+        if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
+            window.title += " · r\(build)"
+        }
         let title = NSTextField(labelWithString: "This virtual Mac is ready for your agent.")
         title.font = .systemFont(ofSize: 19, weight: .semibold)
         let description = NSTextField(wrappingLabelWithString: "Allow Screen Recording and Accessibility inside this VM. Keep this helper running in your logged-in guest desktop. Your physical Mac is not controlled.")
@@ -107,14 +110,19 @@ final class GuestRuntime: NSObject {
             var values: [String: String] = [:]
             switch request.action {
             case "observe.capabilities":
-                values = ["observeVersion": "1", "dirtyRects": "true", "maxWidth": "1280"]
+                values = ["observeVersion": "1", "dirtyRects": "true", "maxWidth": "1280", "captureOptions": "1"]
             case "observe.open":
                 guard !observerOpening else { throw Failure("Observer capture is opening") }
                 guard observerLease == nil else { throw Failure("Observer capture already has a Host lease") }
                 observerOpening = true
                 defer { observerOpening = false }
                 let capture = ObserverCapture()
-                do { try await capture.start(width: number(request, "width", range: 16...1280)) }
+                do {
+                    let cursor = request.arguments["cursor"] ?? "show"
+                    guard ["show", "hide"].contains(cursor) else { throw Failure("Invalid observer cursor option") }
+                    try await capture.start(width: number(request, "width", range: 16...1280),
+                                            maxFPS: number(request, "maxFps", fallback: 30, range: 1...30), showsCursor: cursor == "show")
+                }
                 catch { await capture.stop(); throw error }
                 let lease = UUID()
                 observer = capture; observerLease = lease; observerDeadline = Date().addingTimeInterval(15)

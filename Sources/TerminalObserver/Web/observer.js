@@ -3,7 +3,7 @@ const MAX_MESSAGE = 12 * 1024 * 1024;
 const MAX_FPS = 30;
 
 export class ObserverMeter {
-  constructor(now) { this.maxFps = 0; this.reset(now, 0, 0); }
+  constructor(now, ceiling = MAX_FPS) { this.ceiling = ceiling; this.maxFps = 0; this.reset(now, 0, 0); }
   reset(now, bytes, frames) {
     this.time = now; this.bytes = bytes; this.frames = frames;
     return { fps: 0, maxFps: this.maxFps, kbps: 0 };
@@ -11,7 +11,7 @@ export class ObserverMeter {
   sample(now, bytes, frames) {
     const elapsed = now - this.time;
     if (elapsed <= 0) return { fps: 0, maxFps: this.maxFps, kbps: 0 };
-    const fps = Math.min(MAX_FPS, Math.max(0, frames - this.frames) * 1000 / elapsed);
+    const fps = Math.min(this.ceiling, Math.max(0, frames - this.frames) * 1000 / elapsed);
     const kbps = Math.max(0, bytes - this.bytes) / elapsed;
     this.maxFps = Math.max(this.maxFps, fps);
     this.time = now; this.bytes = bytes; this.frames = frames;
@@ -53,10 +53,10 @@ export function parseBatch(buffer) {
   const headerLength = view.getUint32(8);
   if (headerLength < 2 || headerLength > 65536 || 12 + headerLength > buffer.byteLength) throw Error("Invalid image header length");
   const header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(buffer, 12, headerLength)));
-  const { type, epoch, seq, baseSeq, width, height, codec, blocks } = header;
+  const { type, epoch, seq, baseSeq, width, height, codec, blocks, tileSize = 128 } = header;
   if (!["full", "delta"].includes(type) || !uuid(epoch) || !sequence(seq) || codec !== "png" ||
       !integer(width, 2, 1920) || !integer(height, 2, 2160) || width * height > MAX_PIXELS ||
-      !Array.isArray(blocks) || blocks.length < 1 || blocks.length > 256 ||
+      ![64, 128].includes(tileSize) || !Array.isArray(blocks) || blocks.length < 1 || blocks.length > 256 ||
       (type === "full" ? baseSeq != null || blocks.length !== 1 : !sequence(baseSeq))) throw Error("Invalid image metadata");
   let expectedOffset = 0, pixels = 0, previousIndex = -1;
   const payloadStart = 12 + headerLength;
@@ -67,8 +67,8 @@ export function parseBatch(buffer) {
     if (type === "full") {
       if (b.x !== 0 || b.y !== 0 || b.w !== width || b.h !== height) throw Error("Incomplete full image");
     } else {
-      const index = (b.y / 128) * Math.ceil(width / 128) + b.x / 128;
-      if (b.x % 128 || b.y % 128 || b.w !== Math.min(128, width - b.x) || b.h !== Math.min(128, height - b.y) ||
+      const index = (b.y / tileSize) * Math.ceil(width / tileSize) + b.x / tileSize;
+      if (b.x % tileSize || b.y % tileSize || b.w !== Math.min(tileSize, width - b.x) || b.h !== Math.min(tileSize, height - b.y) ||
           index <= previousIndex) throw Error("Invalid delta tile grid");
       previousIndex = index;
     }
@@ -91,8 +91,41 @@ async function decodePNG(blob) {
   } finally { URL.revokeObjectURL(url); }
 }
 
-if (typeof document !== "undefined") {
+export async function drawBatch(batch, canvas, cancelled = () => false) {
+  const { header: h, buffer, payloadStart } = batch, decoded = new Array(h.blocks.length);
+  let next = 0;
+  try {
+    const workers = Array.from({ length: Math.min(4, h.blocks.length) }, async () => {
+      while (next < h.blocks.length) {
+        if (cancelled()) return;
+        const i = next++, b = h.blocks[i];
+        const blob = new Blob([new Uint8Array(buffer, payloadStart + b.offset, b.length)], { type: "image/png" });
+        const image = await decodePNG(blob);
+        decoded[i] = image;
+        if ((image.width ?? image.naturalWidth) !== b.w || (image.height ?? image.naturalHeight) !== b.h) throw Error("Decoded PNG size mismatch");
+      }
+    });
+    const results = await Promise.allSettled(workers);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
+    if (cancelled()) return false;
+    const stage = document.createElement("canvas"); stage.width = h.width; stage.height = h.height;
+    const ctx = stage.getContext("2d", { alpha: false });
+    if (!ctx) throw Error("Staging Canvas is unavailable");
+    if (h.type === "delta") ctx.drawImage(canvas, 0, 0);
+    h.blocks.forEach((b, i) => ctx.drawImage(decoded[i], b.x, b.y));
+    if (canvas.width !== h.width || canvas.height !== h.height) { canvas.width = h.width; canvas.height = h.height; }
+    const target = canvas.getContext("2d");
+    if (!target || target.isContextLost?.()) throw Error("Canvas context is lost");
+    target.drawImage(stage, 0, 0);
+    return true;
+  } finally { decoded.forEach((image) => image?.close?.()); }
+}
+
+if (typeof document !== "undefined" && document.getElementById("mirror")) {
   const canvas = document.getElementById("mirror"), empty = document.getElementById("empty");
+  const lowSwitch = document.getElementById("low-bandwidth");
+  let lowBandwidth = null, modeTimer;
   let socket, generation = 0, welcome = null, lastSeq = null, disposed = false;
   let bytes = 0, frames = 0, retry = 0, retryTimer, queue = Promise.resolve(), queued = 0;
   let health = "warning";
@@ -101,10 +134,11 @@ if (typeof document !== "undefined") {
   const formatBytes = (n) => n < 1000 ? `${n} B` : n < 1000000 ? `${(n / 1000).toFixed(1)} KB` : `${(n / 1000000).toFixed(2)} MB`;
   const renderMeter = ({ fps, maxFps, kbps }) => {
     text("fps", fps.toFixed(1)); text("fps-max", maxFps.toFixed(1));
-    document.getElementById("fps-fill").style.transform = `scaleX(${fps / MAX_FPS})`;
+    document.getElementById("fps-fill").style.transform = `scaleX(${fps / meter.ceiling})`;
     const progress = document.getElementById("fps-meter");
     progress.setAttribute("aria-valuenow", fps.toFixed(1));
-    progress.setAttribute("aria-valuetext", `${fps.toFixed(1)} FPS; sampled max ${maxFps.toFixed(1)}; ceiling ${MAX_FPS}`);
+    progress.setAttribute("aria-valuemax", String(meter.ceiling));
+    progress.setAttribute("aria-valuetext", `${fps.toFixed(1)} FPS; sampled max ${maxFps.toFixed(1)}; ceiling ${meter.ceiling}`);
     const transfer = `${kbps.toFixed(1)} KB/s`;
     text("transfer", transfer); text("transfer-live", transfer);
   };
@@ -121,54 +155,42 @@ if (typeof document !== "undefined") {
   const recover = (error) => {
     setStatus("warning", "Syncing", error.message); invalidate(); clear(); resetMeter(); send({ type: "resync" });
   };
+  lowSwitch.addEventListener("change", () => {
+    if (socket?.readyState !== WebSocket.OPEN) { lowSwitch.checked = lowBandwidth === true; return; }
+    const low = lowSwitch.checked;
+    lowSwitch.disabled = true;
+    // Coalesce rapid activation and stay below the lifecycle control limit.
+    clearTimeout(modeTimer);
+    modeTimer = setTimeout(() => {
+      if (socket?.readyState === WebSocket.OPEN) send({ type: "mode", lowBandwidth: low });
+    }, 300);
+  });
 
   async function apply(batch, receivedGeneration) {
-    const { header: h, buffer, payloadStart } = batch;
+    const { header: h, buffer } = batch;
     if (receivedGeneration !== generation || document.hidden || !welcome || h.epoch !== welcome.epoch) return;
-    if (h.width !== welcome.width || h.height !== welcome.height ||
+    if (h.width !== welcome.width || h.height !== welcome.height || (h.tileSize ?? 128) !== welcome.tileSize ||
         (h.type === "delta" ? h.baseSeq !== lastSeq : lastSeq === null && h.seq !== "1") ||
         (lastSeq !== null && BigInt(h.seq) !== BigInt(lastSeq) + 1n)) throw Error("Image sequence or baseline mismatch");
-    const started = performance.now(), decoded = new Array(h.blocks.length);
-    let next = 0;
-    try {
-      const workers = Array.from({ length: Math.min(4, h.blocks.length) }, async () => {
-        while (next < h.blocks.length) {
-          if (receivedGeneration !== generation || document.hidden) return;
-          const i = next++, b = h.blocks[i];
-          const blob = new Blob([new Uint8Array(buffer, payloadStart + b.offset, b.length)], { type: "image/png" });
-          const image = await decodePNG(blob);
-          decoded[i] = image;
-          if ((image.width ?? image.naturalWidth) !== b.w || (image.height ?? image.naturalHeight) !== b.h) throw Error("Decoded PNG size mismatch");
-        }
-      });
-      const results = await Promise.allSettled(workers);
-      const failure = results.find((result) => result.status === "rejected");
-      if (failure) throw failure.reason;
-      if (receivedGeneration !== generation || document.hidden) return;
-      const stage = document.createElement("canvas"); stage.width = h.width; stage.height = h.height;
-      const ctx = stage.getContext("2d", { alpha: false });
-      if (!ctx) throw Error("Staging Canvas is unavailable");
-      if (h.type === "delta") ctx.drawImage(canvas, 0, 0);
-      h.blocks.forEach((b, i) => ctx.drawImage(decoded[i], b.x, b.y));
-      if (canvas.width !== h.width || canvas.height !== h.height) { canvas.width = h.width; canvas.height = h.height; }
-      const target = canvas.getContext("2d");
-      if (!target || target.isContextLost?.()) throw Error("Canvas context is lost");
-      target.drawImage(stage, 0, 0);
+    const started = performance.now();
+    if (await drawBatch(batch, canvas, () => receivedGeneration !== generation || document.hidden) &&
+        receivedGeneration === generation && !document.hidden) {
       lastSeq = h.seq; empty.hidden = true; frames++; retry = 0;
       send({ type: "ack", epoch: h.epoch, seq: h.seq });
       const elapsed = performance.now() - started;
-      if (elapsed > 1000 / MAX_FPS) setStatus("warning", "Slow draw", `Decode + draw: ${elapsed.toFixed(1)} ms exceeds the 30 FPS frame budget.`);
+      if (elapsed > 1000 / meter.ceiling) setStatus("warning", "Slow draw", `Decode + draw: ${elapsed.toFixed(1)} ms exceeds the ${meter.ceiling} FPS frame budget.`);
       else setStatus("normal", "Connected");
       text("dimensions", `${h.width} x ${h.height}`);
       text("batch", `${h.type} #${h.seq}`);
       const unit = h.type === "full" ? "image" : h.blocks.length === 1 ? "tile" : "tiles";
       text("batch-detail", `${h.blocks.length} ${unit} / ${formatBytes(buffer.byteLength)}`);
       text("timing", `${elapsed.toFixed(1)} ms`);
-    } finally { decoded.forEach((image) => image?.close?.()); }
+    }
   }
 
   function connect() {
     if (disposed || document.hidden) return;
+    clearTimeout(modeTimer); lowSwitch.disabled = true;
     invalidate(); resetMeter(); setStatus("warning", retry ? "Reconnecting" : "Connecting");
     const ws = new WebSocket(`ws://${location.host}/stream`); socket = ws; ws.binaryType = "arraybuffer";
     ws.onopen = () => {
@@ -184,10 +206,21 @@ if (typeof document !== "undefined") {
         if (typeof event.data === "string") {
           const message = JSON.parse(event.data);
           switch (message.type) {
+            case "mode": {
+              if (typeof message.lowBandwidth !== "boolean" || !integer(message.maxFps, 1, MAX_FPS)) throw Error("Invalid observer mode");
+              const changed = lowBandwidth !== message.lowBandwidth;
+              lowBandwidth = message.lowBandwidth; lowSwitch.checked = lowBandwidth; lowSwitch.disabled = false;
+              if (changed) {
+                invalidate(); clear(); meter.maxFps = 0; meter.ceiling = message.maxFps; resetMeter();
+                setStatus("warning", document.hidden ? "Paused" : "Syncing");
+              }
+              break;
+            }
             case "welcome":
               if (message.v !== 1 || !uuid(message.epoch) || !integer(message.width, 2, 1920) || !integer(message.height, 2, 2160) ||
-                  message.width * message.height > MAX_PIXELS || message.tileSize !== 128 || message.codec !== "png") throw Error("Invalid welcome");
-              invalidate(); welcome = message; break;
+                  message.width * message.height > MAX_PIXELS || ![64, 128].includes(message.tileSize) || message.codec !== "png" ||
+                  !integer(message.maxFps, 1, MAX_FPS)) throw Error("Invalid welcome");
+              invalidate(); welcome = message; meter.ceiling = message.maxFps; resetMeter(); break;
             case "ping": if (typeof message.nonce === "string" && message.nonce.length <= 64) send({ type: "pong", nonce: message.nonce }); break;
             case "error": invalidate(); clear(); resetMeter(); setStatus("error", "Error", String(message.message)); break;
             case "state": setStatus("warning", "Syncing"); break;
@@ -203,6 +236,7 @@ if (typeof document !== "undefined") {
     ws.onerror = () => { if (ws === socket) setStatus("error", "Error", "WebSocket connection failed"); };
     ws.onclose = () => {
       if (ws !== socket) return;
+      clearTimeout(modeTimer); lowSwitch.disabled = true;
       invalidate(); clear(); resetMeter();
       setStatus("error", "Disconnected", document.getElementById("error").textContent || "WebSocket disconnected; reconnecting.");
       if (!disposed && !document.hidden) {
@@ -222,7 +256,8 @@ if (typeof document !== "undefined") {
     else connect();
   });
   window.addEventListener("pagehide", () => {
-    disposed = true; clearTimeout(retryTimer); invalidate(); resetMeter(); send({ type: "pause" }); socket?.close(); clear();
+    disposed = true; clearTimeout(retryTimer); clearTimeout(modeTimer); lowSwitch.disabled = true;
+    invalidate(); resetMeter(); send({ type: "pause" }); socket?.close(); clear();
   });
   window.addEventListener("pageshow", (event) => { if (event.persisted) { disposed = false; connect(); } });
   setInterval(() => {
