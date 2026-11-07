@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>terminal-mac observer</title>
+  <link rel="stylesheet" href="/observer.css">
+  <script type="module" src="/observer.js"></script>
+</head>
+<body>
+  <main>
+    <div class="phone">
+      <div class="screen">
+        <div class="camera" aria-hidden="true"></div>
+        <header><strong>terminal-mac</strong><span id="status">Connecting</span></header>
+        <section class="mirror" aria-label="Guest desktop">
+          <canvas id="mirror" width="640" height="400"></canvas>
+          <div id="empty">Waiting for Guest</div>
+        </section>
+        <div class="home" aria-hidden="true"></div>
+      </div>
+    </div>
+    <aside aria-label="Debug">
+      <h1>Observer Debug</h1>
+      <dl>
+        <dt>Received</dt><dd id="bytes">0 B</dd>
+        <dt>Image FPS</dt><dd id="fps">0</dd>
+        <dt>Frame</dt><dd id="dimensions">--</dd>
+        <dt>Last batch</dt><dd id="batch">--</dd>
+        <dt>Decode + draw</dt><dd id="timing">--</dd>
+      </dl>
+      <pre id="error" role="status"></pre>
+    </aside>
+  </main>
+</body>
+</html>

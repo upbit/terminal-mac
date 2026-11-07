@@ -13,7 +13,7 @@ The guest is a separate Mac: it has its own apps, files, accounts and permission
 ## Requirements
 
 - Apple silicon Mac, macOS 14 or later.
-- No development tools are needed for a prebuilt release. Maintainers need Xcode 16 or later / Swift 6 to build.
+- No development tools are needed for a prebuilt release. Maintainers need Swift 6.1 or newer (Xcode 16.3 or newer) to build; the observer's SwiftNIO dependency requires it.
 - Internet on first run to download macOS directly from Apple, or an existing compatible `.ipsw`.
 - Space for the cached restore image and a growing VM disk (64 GiB logical size by default).
 - Ghostty, Kitty or iTerm2 for the inline viewer. Other terminals can use the native VM window and agent CLI. tmux passthrough and automatic terminal splits are not implemented.
@@ -122,6 +122,23 @@ Agents can drive the guest through an MCP server: `claude mcp add terminal-mac -
 New VMs use a 2x HiDPI display (for example 2560×1600 pixels at 220 ppi for the default 1280×800 points), so text stays sharp on Retina terminals. Switch a stopped VM with `terminal-mac display default --hidpi` or `--standard`.
 
 The automounted volume is supplied by macOS virtio-fs. If it is absent, check the guest's macOS version and the VM log; this prototype has no fallback guest transport.
+
+## Local observer debug preview
+
+```sh
+./dist/terminal-mac observe default --port 0 --width 640
+```
+
+Open the printed `http://127.0.0.1:PORT/` address in a Mac browser. The page shows
+an iPhone-shaped preview, a read-only VM Canvas, received message bytes, image FPS,
+and debug errors. The Guest helper needs observer protocol v1 and Screen Recording,
+but not Accessibility. Capture uses a separate stream, up to 30 FPS, with native
+dirtyRects and 128px PNG tiles. Unchanged pixels are not pushed.
+
+This is loopback HTTP/WS only, not a real-phone or public deployment. There is no
+VM input or lifecycle control. Ctrl+C closes the observer, leaving the VM and
+terminal viewer alone. See [decisions](docs/PHONE_OBSERVER_DECISIONS.md) and
+[validation](docs/PHONE_OBSERVER_VALIDATION.md) for the current scope and test limits.
 
 ## Give an agent computer control
 
