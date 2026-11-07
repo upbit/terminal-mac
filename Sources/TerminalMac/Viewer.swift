@@ -143,6 +143,9 @@ final class TerminalViewer {
             if Date().timeIntervalSince(lastChrome) >= 0.08 { lastChrome = Date(); drawChrome() }
             try await Task.sleep(nanoseconds: 4_000_000)
         }
+        // Let the current frame request finish so its reply and image are removed.
+        quit = true
+        await frames?.value
         if let failure { throw failure }
     }
 
@@ -162,6 +165,7 @@ final class TerminalViewer {
                 defer { mailbox.remove("image-\(request.id.uuidString).bin"); mailbox.remove("image-\(request.id.uuidString).png") }
                 do {
                     let reply = try await mailbox.call(request)
+                    if quit { break }
                     failures = 0
                     if grants?.input != true, Date().timeIntervalSince(grantsCheckedAt) > 2 { await checkGrants() }
                     connected()

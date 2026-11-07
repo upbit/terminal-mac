@@ -31,6 +31,31 @@ else
 fi
 TERMINAL_MAC_HOME="$work/unused-data" "$launcher" skills get | grep -q '^name: terminal-mac$'
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | TERMINAL_MAC_HOME="$work/unused-data" "$launcher" mcp | grep -q '"screenshot"'
+python3 - "$launcher" "$work/unused-data" <<'PYTEST'
+import json, os, subprocess, sys
+
+launcher, data_root = sys.argv[1:]
+coordinates = (1e30, -1e30, 0.5, True, "12", 12, 12.0)
+requests = [
+    {"jsonrpc": "2.0", "id": index, "method": "tools/call",
+     "params": {"name": "click", "arguments": {"x": x, "y": 0}}}
+    for index, x in enumerate(coordinates)
+]
+requests.append({"jsonrpc": "2.0", "id": len(coordinates), "method": "ping"})
+result = subprocess.run(
+    [launcher, "mcp"], input="".join(json.dumps(request) + "\n" for request in requests),
+    env={**os.environ, "TERMINAL_MAC_HOME": data_root}, capture_output=True,
+    text=True, check=True, timeout=10,
+)
+responses = {reply["id"]: reply["result"] for reply in map(json.loads, result.stdout.splitlines())}
+for index, x in enumerate(coordinates):
+    response = responses[index]
+    assert response["isError"], response
+    message = response["content"][0]["text"]
+    expected = "No virtual Mac named" if index >= 5 else "Expected an integer in range for 'x'"
+    assert expected in message, (x, message)
+assert responses[len(coordinates)] == {}, responses
+PYTEST
 if "$launcher" up ../escape --plan > "$work/name.log" 2>&1; then echo 'Invalid machine name was accepted.' >&2; exit 1; fi
 conflict="$work/conflict"
 mkdir -p "$conflict/bin"

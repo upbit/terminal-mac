@@ -1,3 +1,4 @@
+import CoreFoundation
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -74,7 +75,11 @@ final class AgentServer {
 
     private func call(_ tool: String, _ a: [String: Any]) async throws -> [[String: Any]] {
         func int(_ key: String) throws -> String {
-            guard let value = a[key] as? Int ?? (a[key] as? Double).map({ Int($0) }) else { throw Failure("Missing integer '\(key)'") }
+            guard let number = a[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let value = number as? Int else {
+                throw Failure("Expected an integer in range for '\(key)'")
+            }
             return String(value)
         }
         func string(_ key: String) throws -> String {
