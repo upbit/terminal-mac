@@ -24,6 +24,11 @@ final class GuestRuntime: NSObject {
     var window: NSWindow?
     var label: NSTextField?
     let desktop = DesktopStream()
+    var observer: ObserverCapture?
+    var observerLease: UUID?
+    var observerDeadline = Date.distantPast
+    var observerOpening = false, observerPolling = false
+    var observerFiles: [String: Date] = [:]
     var lastRequest = Date.distantPast
 
     let tools: URL
@@ -40,6 +45,9 @@ final class GuestRuntime: NSObject {
         NSApp.setActivationPolicy(.regular)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 300), styleMask: [.titled, .miniaturizable], backing: .buffered, defer: false)
         window.title = "terminal-mac guest helper"
+        if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
+            window.title += " · r\(build)"
+        }
         let title = NSTextField(labelWithString: "This virtual Mac is ready for your agent.")
         title.font = .systemFont(ofSize: 19, weight: .semibold)
         let description = NSTextField(wrappingLabelWithString: "Allow Screen Recording and Accessibility inside this VM. Keep this helper running in your logged-in guest desktop. Your physical Mac is not controlled.")
@@ -66,11 +74,18 @@ final class GuestRuntime: NSObject {
                     for request in try mailbox.requests() {
                         lastRequest = Date()
                         // Live frames long-poll for changes; input must never wait behind them.
-                        if request.arguments["format"] == "bgra-lz4" { Task { await self.handle(request) } }
+                        if request.arguments["format"] == "bgra-lz4" || request.action.hasPrefix("observe.") { Task { await self.handle(request) } }
                         else { await handle(request) }
                     }
                 } catch { stderr(error.localizedDescription) }
                 desktop.stopIfIdle()
+                if Date() > observerDeadline, let observer {
+                    self.observer = nil; observerLease = nil
+                    Task { await observer.stop() }
+                }
+                for (name, deadline) in observerFiles where Date() > deadline {
+                    mailbox.remove(name); observerFiles.removeValue(forKey: name)
+                }
                 if Date().timeIntervalSince(lastUpdateCheck) > 30 { lastUpdateCheck = Date(); GuestBootstrap.updateFromSharedTools(tools) }
                 // Poll quickly while a viewer or agent is active, and gently when idle.
                 try? await Task.sleep(nanoseconds: Date().timeIntervalSince(lastRequest) < 3 ? 3_000_000 : 40_000_000)
@@ -94,6 +109,56 @@ final class GuestRuntime: NSObject {
             try GuestGuard.requireVirtualMac()
             var values: [String: String] = [:]
             switch request.action {
+            case "observe.capabilities":
+                values = ["observeVersion": "1", "dirtyRects": "true", "maxWidth": "1280", "captureOptions": "1"]
+            case "observe.open":
+                guard !observerOpening else { throw Failure("Observer capture is opening") }
+                guard observerLease == nil else { throw Failure("Observer capture already has a Host lease") }
+                observerOpening = true
+                defer { observerOpening = false }
+                let capture = ObserverCapture()
+                do {
+                    let cursor = request.arguments["cursor"] ?? "show"
+                    guard ["show", "hide"].contains(cursor) else { throw Failure("Invalid observer cursor option") }
+                    try await capture.start(width: number(request, "width", range: 16...1280),
+                                            maxFPS: number(request, "maxFps", fallback: 30, range: 1...30), showsCursor: cursor == "show")
+                }
+                catch { await capture.stop(); throw error }
+                let lease = UUID()
+                observer = capture; observerLease = lease; observerDeadline = Date().addingTimeInterval(15)
+                values = ["lease": lease.uuidString, "epoch": capture.epoch]
+            case "observe.poll":
+                guard let lease = observerLease, request.arguments["lease"] == lease.uuidString,
+                      let capture = observer, Date() < observerDeadline else { throw Failure("Observer capture lease expired") }
+                guard !observerPolling else { throw Failure("An observer poll is already in flight") }
+                guard CGPreflightScreenCaptureAccess() else { throw Failure("Screen Recording is not allowed inside the VM") }
+                guard let after = UInt64(request.arguments["after"] ?? "") else { throw Failure("Invalid observer capture sequence") }
+                let epoch = request.arguments["epoch"] ?? ""
+                let wait = Double(try number(request, "wait", fallback: 1000, range: 0...1000)) / 1000
+                observerPolling = true; observerDeadline = Date().addingTimeInterval(15)
+                defer { observerPolling = false }
+                guard let frame = try await capture.frame(after: after, epoch: epoch, wait: wait) else {
+                    values = ["unchanged": "true", "epoch": capture.epoch]; break
+                }
+                // Retain the immutable buffer while compression runs outside the main actor.
+                let encoded = try await Task.detached {
+                    try DesktopStream.encode(DesktopStream.Frame(buffer: frame.buffer, sequence: 0))
+                }.value
+                guard observer === capture, observerLease == lease, CGPreflightScreenCaptureAccess(), Date() < request.deadline else {
+                    throw Failure("Observer capture ended during encoding")
+                }
+                let filename = "observe-\(lease.uuidString)-\(request.id.uuidString).bin"
+                try mailbox.write(encoded.data, named: filename)
+                observerFiles[filename] = Date().addingTimeInterval(15)
+                values = ["image": filename, "epoch": capture.epoch, "sequence": String(frame.sequence),
+                          "width": String(encoded.width), "height": String(encoded.height), "bytesPerRow": String(encoded.bytesPerRow)]
+                if let tiles = frame.tiles {
+                    values["tiles"] = String(decoding: try JSONEncoder().encode(tiles.sorted()), as: UTF8.self)
+                } else { values["fullDirty"] = "true" }
+            case "observe.close":
+                guard let lease = observerLease, request.arguments["lease"] == lease.uuidString else { throw Failure("Invalid observer lease") }
+                let capture = observer; observer = nil; observerLease = nil
+                await capture?.stop()
             case "status":
                 let bounds = CGDisplayBounds(CGMainDisplayID())
                 values = ["screenRecording": String(CGPreflightScreenCaptureAccess()), "accessibility": String(AXIsProcessTrusted()),
@@ -184,6 +249,9 @@ final class GuestRuntime: NSObject {
             }
             try mailbox.respond(Reply(id: request.id, values: values))
         } catch { try? mailbox.respond(Reply(id: request.id, error: error.localizedDescription)) }
+        if request.action.hasPrefix("observe.") {
+            observerFiles["reply-\(request.id.uuidString).json"] = Date().addingTimeInterval(15)
+        }
     }
     func requireAccessibility() throws {
         guard AXIsProcessTrusted() else { throw Failure("Allow Accessibility for TerminalMacGuest inside the VM") }

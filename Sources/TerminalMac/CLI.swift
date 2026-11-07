@@ -1,6 +1,7 @@
 import AppKit
 import Virtualization
 import TerminalMacCore
+import TerminalObserver
 import Darwin
 
 @MainActor
@@ -148,6 +149,42 @@ final class CLI {
             guard runtimeIsLocked(try store.directory(name)) else { throw Failure("VM '\(name)' is stopped. Start it with: terminal-mac start \(name)") }
             let viewer = try TerminalViewer(directory: store.directory(name), machine: machine, graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"))
             try await viewer.run()
+        case "observe":
+            let args = try Arguments(tail, flags: ["low-bandwidth", "hide-cursor"],
+                                     options: ["port", "width", "tile-size", "full-threshold", "max-fps", "budget-kbps"])
+            let profile: ObserverConfiguration = args.flags.contains("low-bandwidth") ? .low : .standard
+            let policy: ObserverPNGPolicy = args.options["full-threshold"] != nil
+                ? .threshold(try args.integer("full-threshold", default: 40, range: 1...100)) : profile.pngPolicy
+            let configuration = try ObserverConfiguration(
+                maxFPS: args.integer("max-fps", default: profile.maxFPS, range: 1...30),
+                bytesPerSecond: args.options["budget-kbps"] != nil
+                    ? args.integer("budget-kbps", default: 180, range: 1...10000) * 1000 : profile.bytesPerSecond,
+                tileSize: args.integer("tile-size", default: profile.tileSize, range: 64...128), pngPolicy: policy)
+            let name = try args.machineName()
+            _ = try store.load(name)
+            let directory = try store.directory(name)
+            let lock = try FileLock(directory.appendingPathComponent("observer.lock"))
+            let server = ObserverServer(source: GuestObserverSource(directory: directory,
+                width: try args.integer("width", default: 640, range: 16...1280), maxFPS: configuration.maxFPS,
+                showsCursor: !args.flags.contains("hide-cursor")), configuration: configuration,
+                lowBandwidth: args.flags.contains("low-bandwidth"))
+            let signals = [SIGINT, SIGTERM, SIGHUP]
+            let old = signals.map { Darwin.signal($0, SIG_IGN) }
+            var finished = false
+            let sources = signals.map { number -> DispatchSourceSignal in
+                let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+                source.setEventHandler { finished = true }; source.resume(); return source
+            }
+            defer {
+                withExtendedLifetime(lock) {}
+                for (i, source) in sources.enumerated() { source.cancel(); Darwin.signal(signals[i], old[i]) }
+            }
+            do {
+                let port = try await server.start(port: args.integer("port", default: 0, range: 0...65535))
+                print("Observer: http://127.0.0.1:\(port)/"); fflush(stdout)
+                while !finished { try await Task.sleep(nanoseconds: 100_000_000) }
+                await server.stop()
+            } catch { await server.stop(); throw error }
         case "guest":
             let args = try Arguments(tail, flags: ["check"], options: ["exchange"])
             guard args.positionals.isEmpty else { throw Failure("Usage: terminal-mac guest [--check] [--exchange PATH]") }
@@ -249,6 +286,14 @@ final class CLI {
     start [NAME] [--window]       Boot in the background; show setup window if requested
     view [NAME] [--read-only]     Live terminal desktop (Ghostty, Kitty, iTerm2)
       [--protocol kitty|iterm]    Ctrl+G opens Mac shortcuts; Ctrl+] exits
+    observe [NAME]              Local read-only PNG delta debug preview
+      --low-bandwidth          Start at 480px, 10 FPS, 180 KB/s, adaptive PNG
+      --hide-cursor            Exclude cursor from the observer capture
+      --tile-size 64|128       Delta tile size (default 128)
+      --max-fps 1...30         Capture/send ceiling
+      --budget-kbps N          Decimal KB/s image budget (not kilobits)
+      --full-threshold 1...100 Fixed full fallback for A/B tests
+      [--port 0 --width 640]     HTTP/WS on 127.0.0.1; Ctrl+C exits
     show|hide [NAME]             Show or hide the native VM window
     status|pause|resume [NAME]   Manage the VM
     stop [NAME] [--force]        Request guest shutdown (or immediately power off)

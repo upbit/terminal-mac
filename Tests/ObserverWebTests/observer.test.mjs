@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { crc32 } from 'node:zlib';
+import { ObserverMeter, parseBatch } from '../../Sources/TerminalObserver/Web/observer.js';
+
+const epoch = '459d11da-fc80-490e-a7a8-7b670cc93a03';
+function envelope({ type = 'full', width = 640, height = 400, blocks, mutate } = {}) {
+  blocks ??= [{ x: 0, y: 0, w: width, h: height, offset: 0, length: 57 }];
+  const header = { type, epoch, seq: type === 'full' ? '1' : '2', baseSeq: type === 'full' ? null : '1', width, height, codec: 'png', blocks };
+  mutate?.(header);
+  const metadata = Buffer.from(JSON.stringify(header));
+  const prefix = Buffer.alloc(12); prefix.write('TMOB'); prefix.writeUInt16BE(1, 4); prefix.writeUInt32BE(metadata.length, 8);
+  // Structurally valid PNG fixtures for validation, not for image decoding.
+  const pngs = blocks.map((b) => {
+    const png = Buffer.alloc(57); png.writeUInt32BE(0x89504e47); png.writeUInt32BE(0x0d0a1a0a, 4);
+    png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(b.w, 16); png.writeUInt32BE(b.h, 20);
+    png[24] = 8; png[25] = 2; png.writeUInt32BE(crc32(png.subarray(12, 29)), 29);
+    png.write('IDAT', 37); png.writeUInt32BE(crc32(png.subarray(37, 41)), 41);
+    png.write('IEND', 49); png.writeUInt32BE(crc32(png.subarray(49, 53)), 53); return png;
+  });
+  const data = Buffer.concat([prefix, metadata, ...pngs]);
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+}
+test('full and partial edge tile validate', () => {
+  assert.equal(parseBatch(envelope()).header.type, 'full');
+  const edge = { x: 512, y: 384, w: 128, h: 16, offset: 0, length: 57 };
+  assert.equal(parseBatch(envelope({ type: 'delta', blocks: [edge] })).header.blocks[0].h, 16);
+});
+test('negotiated 64px tiles retain edge and grid validation', () => {
+  const edge = { x: 576, y: 384, w: 64, h: 16, offset: 0, length: 57 };
+  const options = { type: 'delta', blocks: [edge], mutate: (h) => { h.tileSize = 64; } };
+  assert.equal(parseBatch(envelope(options)).header.tileSize, 64);
+  assert.throws(() => parseBatch(envelope({ ...options, blocks: [{ ...edge, x: 575 }] })));
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.tileSize = 96; } })));
+});
+test('bad message lengths and versions reject before PNG decode', () => {
+  assert.throws(() => parseBatch(new ArrayBuffer(11)));
+  const data = envelope(); new DataView(data).setUint32(8, 65537); assert.throws(() => parseBatch(data));
+  const version = envelope(); new DataView(version).setUint16(4, 2); assert.throws(() => parseBatch(version));
+});
+test('oversized dimensions and imprecise sequence numbers reject', () => {
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.width = 999999; } })));
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.seq = 2; } })));
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.seq = '18446744073709551616'; } })));
+});
+test('duplicate, overlapping or unsorted delta tiles reject', () => {
+  const b = { x: 0, y: 0, w: 128, h: 128, offset: 0, length: 57 };
+  assert.throws(() => parseBatch(envelope({ type: 'delta', blocks: [b, { ...b, offset: 57 }] })));
+  assert.throws(() => parseBatch(envelope({ type: 'delta', blocks: [{ ...b, x: 1 }] })));
+  assert.throws(() => parseBatch(envelope({ type: 'delta', blocks: [{ ...b, x: 128 }, { ...b, offset: 57 }] })));
+});
+test('payload holes, trailing bytes and PNG dimension mismatch reject', () => {
+  assert.throws(() => parseBatch(envelope({ mutate: (h) => { h.blocks[0].offset = 1; } })));
+  const original = new Uint8Array(envelope()), trailing = new Uint8Array(original.length + 1); trailing.set(original);
+  assert.throws(() => parseBatch(trailing.buffer));
+  const mismatch = envelope(), view = new DataView(mismatch), start = 12 + view.getUint32(8);
+  view.setUint32(start + 16, 100000); assert.throws(() => parseBatch(mismatch));
+});
+test('PNG chunk CRC and missing end reject', () => {
+  const corrupt = envelope(), view = new DataView(corrupt), start = 12 + view.getUint32(8);
+  view.setUint32(start + 41, 123); assert.throws(() => parseBatch(corrupt), /checksum/);
+  const incomplete = envelope(), v = new DataView(incomplete), begin = 12 + v.getUint32(8);
+  new Uint8Array(incomplete).fill(0, begin + 45); assert.throws(() => parseBatch(incomplete));
+});
+test('FPS and transfer use actual sampling duration, with a 30 FPS ceiling', () => {
+  const meter = new ObserverMeter(0);
+  assert.deepEqual(meter.sample(1000, 120000, 12), { fps: 12, maxFps: 12, kbps: 120 });
+  assert.deepEqual(meter.sample(3000, 320000, 32), { fps: 10, maxFps: 12, kbps: 100 });
+  assert.deepEqual(meter.sample(4000, 340000, 90), { fps: 30, maxFps: 30, kbps: 20 });
+});
+test('static content reports zero FPS and transfer while retaining the peak', () => {
+  const meter = new ObserverMeter(0);
+  meter.sample(1000, 100000, 20);
+  assert.deepEqual(meter.sample(2000, 100000, 20), { fps: 0, maxFps: 20, kbps: 0 });
+});
+test('pause or reconnect resets the window, not cumulative counters or FPS peak', () => {
+  const meter = new ObserverMeter(0);
+  meter.sample(1000, 100000, 25);
+  assert.deepEqual(meter.reset(60000, 100000, 25), { fps: 0, maxFps: 25, kbps: 0 });
+  assert.deepEqual(meter.sample(61000, 110000, 26), { fps: 1, maxFps: 25, kbps: 10 });
+});
+test('duplicate timestamps do not create infinite metrics', () => {
+  const meter = new ObserverMeter(1000);
+  assert.deepEqual(meter.sample(1000, 1000, 30), { fps: 0, maxFps: 0, kbps: 0 });
+});
+test('low bandwidth meter uses the negotiated FPS ceiling', () => {
+  const meter = new ObserverMeter(0, 10);
+  assert.deepEqual(meter.sample(1000, 180000, 15), { fps: 10, maxFps: 10, kbps: 180 });
+});

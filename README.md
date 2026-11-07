@@ -13,7 +13,7 @@ The guest is a separate Mac: it has its own apps, files, accounts and permission
 ## Requirements
 
 - Apple silicon Mac, macOS 14 or later.
-- No development tools are needed for a prebuilt release. Maintainers need Xcode 16 or later / Swift 6 to build.
+- No development tools are needed for a prebuilt release. Maintainers need Swift 6.1 or newer (Xcode 16.3 or newer) to build; the observer's SwiftNIO dependency requires it.
 - Internet on first run to download macOS directly from Apple, or an existing compatible `.ipsw`.
 - Space for the cached restore image and a growing VM disk (64 GiB logical size by default).
 - Ghostty, Kitty or iTerm2 for the inline viewer. Other terminals can use the native VM window and agent CLI. tmux passthrough and automatic terminal splits are not implemented.
@@ -122,6 +122,50 @@ Agents can drive the guest through an MCP server: `claude mcp add terminal-mac -
 New VMs use a 2x HiDPI display (for example 2560×1600 pixels at 220 ppi for the default 1280×800 points), so text stays sharp on Retina terminals. Switch a stopped VM with `terminal-mac display default --hidpi` or `--standard`.
 
 The automounted volume is supplied by macOS virtio-fs. If it is absent, check the guest's macOS version and the VM log; this prototype has no fallback guest transport.
+
+## Local observer debug preview
+
+```sh
+./dist/terminal-mac observe default --port 0 --width 640
+```
+
+Open the printed `http://127.0.0.1:PORT/` address in a Mac browser. The page shows
+an iPhone-shaped preview, a read-only VM Canvas, received message bytes, image FPS,
+and debug errors. The Guest helper needs observer protocol v1 and Screen Recording,
+but not Accessibility. Capture uses a separate stream, up to 30 FPS, with native
+dirtyRects and 128px PNG tiles. Unchanged pixels are not pushed.
+
+The **Low bitrate** switch beside the Debug title changes the live observer from
+640px to 480px wide (proportional height). Turn it off to restore the standard
+capture width. Switching refreshes the full image; it does not resize the VM's
+display or affect terminal capture. All tabs connected to this observer service
+share the setting, including newly opened/reloaded tabs.
+
+To start with the switch already on and optionally hide the cursor, use:
+
+```sh
+./dist/terminal-mac observe default --low-bandwidth --hide-cursor
+```
+
+This keeps lossless output at up to 480px, caps capture/sending at 10 FPS, and paces each
+connection against a 180 KB/s image-message budget. It compares full/delta sizes
+near the crossover instead of always sending full at 40% dirty coverage. Idle
+time does not accumulate burst credit; a large initial or recovery image can
+still exceed a one-second budget and delays subsequent sends. Mouse hiding is
+optional and only affects the observer, not the terminal viewer. An updated Guest
+helper with `captureOptions:1` is required; older helpers report an upgrade error.
+
+`--tile-size 64` is available for comparison, but 128 remains the default: the
+recorded Tripadvisor banner used more bytes and more browser decode work with
+64px tiles. `--max-fps`, `--budget-kbps` (decimal KB/s), and `--full-threshold`
+(fixed percentage, for A/B tests) override the profile. See
+[low-bandwidth measurements](docs/PHONE_OBSERVER_LOW_BANDWIDTH.md) for strategy,
+reproduction commands, results, and limits.
+
+This is loopback HTTP/WS only, not a real-phone or public deployment. There is no
+VM input or lifecycle control. Ctrl+C closes the observer, leaving the VM and
+terminal viewer alone. See [decisions](docs/PHONE_OBSERVER_DECISIONS.md) and
+[validation](docs/PHONE_OBSERVER_VALIDATION.md) for the current scope and test limits.
 
 ## Give an agent computer control
 
