@@ -14,6 +14,7 @@ The guest is a separate Mac: it has its own apps, files, accounts and permission
 
 - Apple silicon Mac, macOS 14 or later.
 - No development tools are needed for a prebuilt release. Maintainers need Swift 6.1 or newer (Xcode 16.3 or newer) to build; the observer's SwiftNIO dependency requires it.
+- Remote `connect` additionally requires Chrome, Python 3.11+, Playwright 1.59.0 and keyring 25.7.0. Dependencies are installed explicitly, not at runtime.
 - Internet on first run to download macOS directly from Apple, or an existing compatible `.ipsw`.
 - Space for the cached restore image and a growing VM disk (64 GiB logical size by default).
 - Ghostty, Kitty or iTerm2 for the inline viewer. Other terminals can use the native VM window and agent CLI. tmux passthrough and automatic terminal splits are not implemented.
@@ -125,49 +126,46 @@ New VMs use a 2x HiDPI display (for example 2560×1600 pixels at 220 ppi for the
 
 The automounted volume is supplied by macOS virtio-fs. If it is absent, check the guest's macOS version and the VM log; this prototype has no fallback guest transport.
 
-## Local observer debug preview
+## Remote observer (local verification complete)
 
 ```sh
-./dist/terminal-mac observe default --port 0 --width 640
+terminal-mac connect default
+terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
+terminal-mac disconnect default
 ```
 
-Open the printed `http://127.0.0.1:PORT/` address in a Mac browser. The page shows
-an iPhone-shaped preview, a read-only VM Canvas, received message bytes, image FPS,
-and debug errors. The Guest helper needs observer protocol v1 and Screen Recording,
-but not Accessibility. Capture uses a separate stream, up to 30 FPS, with native
-dirtyRects and 128px PNG tiles. Unchanged pixels are not pushed.
+`connect` replaces the local `observe` entry, which now only reports migration.
+The client supports SSO, Keychain credentials, restricted binding WSS, native QR,
+credential recovery and on-demand remote observation. It requires the formal
+relay v1 server; the old probe is incompatible. Hub sends raw PNG full/delta via
+one bounded writer after the ready/subscribe barrier; browser ACK commits the
+baseline. The default is low bandwidth (480px, 10 FPS ceiling, 180,000 B/s).
+Only the selected Guest can be captured, and only while subscribed. Canvas and
+its tests now live in the server repository, not in the client app.
+Local synthetic Swift/relay/Chrome verification passed; real SSO/Guest/mobile
+acceptance has not been performed.
 
-The **Low bitrate** switch beside the Debug title changes the live observer from
-640px to 480px wide (proportional height). Turn it off to restore the standard
-capture width. Switching refreshes the full image; it does not resize the VM's
-display or affect terminal capture. All tabs connected to this observer service
-share the setting, including newly opened/reloaded tabs.
+Interactive startup selects a server unless `--server` is supplied. SSO first
+checks this program's saved Keychain session, attempts one silent renewal, and
+opens an isolated Chrome context only when login is needed. `--force-login`
+replaces the selected service's SSO cache. First binding needs explicit browser
+confirmation; it is not automatically granted by SSO. A native QR window shows
+the remaining lifetime; expiry greys the QR under a regenerate button. Confirmed
+online closes the window and returns the CLI while a background terminal-mac
+process holds the same WSS. `disconnect` stops that process without unbinding or
+starting/stopping the VM. Closing before confirmation attempts pending cancel.
+Noninteractive startup requires a reusable server, SSO and bound credential.
+Exact pending cancellation is supported by the server. Normal connect resumes
+the original pending key/QR; only explicit cancel/regenerate abandons it.
+Network errors and frontend transport EOF do not cancel pending. Detach and
+repeat-connect status validate the current live connection generation.
 
-To start with the switch already on and optionally hide the cursor, use:
-
-```sh
-./dist/terminal-mac observe default --low-bandwidth --hide-cursor
-```
-
-This keeps lossless output at up to 480px, caps capture/sending at 10 FPS, and paces each
-connection against a 180 KB/s image-message budget. It compares full/delta sizes
-near the crossover instead of always sending full at 40% dirty coverage. Idle
-time does not accumulate burst credit; a large initial or recovery image can
-still exceed a one-second budget and delays subsequent sends. Mouse hiding is
-optional and only affects the observer, not the terminal viewer. An updated Guest
-helper with `captureOptions:1` is required; older helpers report an upgrade error.
-
-`--tile-size 64` is available for comparison, but 128 remains the default: the
-recorded Tripadvisor banner used more bytes and more browser decode work with
-64px tiles. `--max-fps`, `--budget-kbps` (decimal KB/s), and `--full-threshold`
-(fixed percentage, for A/B tests) override the profile. See
-[low-bandwidth measurements](docs/PHONE_OBSERVER_LOW_BANDWIDTH.md) for strategy,
-reproduction commands, results, and limits.
-
-This is loopback HTTP/WS only, not a real-phone or public deployment. There is no
-VM input or lifecycle control. Ctrl+C closes the observer, leaving the VM and
-terminal viewer alone. See [decisions](docs/PHONE_OBSERVER_DECISIONS.md) and
-[validation](docs/PHONE_OBSERVER_VALIDATION.md) for the current scope and test limits.
+See [setup and current boundary](docs/REMOTE_OBSERVER_SETUP.md),
+[MVP plan](docs/REMOTE_OBSERVER_MVP.md) and
+[QR/background adjustment](docs/REMOTE_OBSERVER_QR_ADJUSTMENTS.md) and
+[implementation evidence](docs/REMOTE_OBSERVER_VALIDATION.md). The old local
+observer code and browser decoder remain for tests until the P2 server migration;
+they are no longer a CLI viewing entry.
 
 ## Give an agent computer control
 

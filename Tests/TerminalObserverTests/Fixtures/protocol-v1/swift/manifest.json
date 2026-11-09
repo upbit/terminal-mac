@@ -1,0 +1,17 @@
+{
+  "files" : {
+    "controls.json" : "ad4ecdefeb0b55d4cf54dda607b21d1cc18a41b885848be25b67aec048f514a4",
+    "corrupt.tmob" : "49b84d1f323703f1fecb4d7a924a63064cf516f4a5d88e8d17e9aeac0978bdcb",
+    "delta.tmob" : "0b73ebc4b49fa39581236ab6ead8aec435c191913dd3ff0f1a2e86f08acf151f",
+    "full.tmob" : "1e95b247f5728d9cbcf4a3af209956e1f9f564314fe6202aa108bd62ee415ee9",
+    "oracle.tmob" : "6a66a8ec7f60ad906f6b0e932d6f190aa3da86adff1d00a7bdf70929df870764"
+  },
+  "producer" : "terminal-mac\/ObserverPNG",
+  "producerSources" : {
+    "Sources\/TerminalMacCore\/Observer.swift" : "daff8f7e82a935f53c95bcbd5e351c40747d5b5efcc553b4af940db427cd4c96",
+    "Sources\/TerminalObserver\/ObserverPNG.swift" : "25fdcbe02e07288567047fc036eaa8c8bb38b3e449a373a9b17f056d0442ad0f",
+    "Tests\/TerminalObserverTests\/ProtocolFixtureTests.swift" : "d229feec0b32c5e18445fd06e1f205979f1e1f51fd5860daba718fd75b143b4a"
+  },
+  "relayVersion" : 1,
+  "tmobVersion" : 1
+}

@@ -11,8 +11,9 @@ struct Entry {
             do { try GuestGuard.requireVirtualMac() }
             catch { stderr("terminal-mac: \(error.localizedDescription)"); exit(1) }
         }
-        if command == "__run" { _ = setsid() }
-        let needsApplication = command == "__run" || guestMode
+        if command == "__run" || command == "__observer" { _ = setsid() }
+        if command == "connect" || command == "__observer" { Darwin.signal(SIGPIPE, SIG_IGN) }
+        let needsApplication = command == "__run" || guestMode || (command == "connect" && isatty(STDIN_FILENO) == 1)
         if needsApplication { NSApplication.shared.setActivationPolicy(.accessory) }
         let cli = CLI()
         Task { @MainActor in

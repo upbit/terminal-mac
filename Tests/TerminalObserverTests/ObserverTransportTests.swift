@@ -26,6 +26,42 @@ actor TestObserverSource: ObserverSource {
 }
 
 final class ObserverTransportTests: XCTestCase {
+    func testCancellationDuringGuestOpenStillClosesTheAcquiredLease() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("observer-open-cancel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lock = try FileLock(directory.appendingPathComponent("runtime.lock"))
+        let host = try Mailbox(directory.appendingPathComponent("host-control"), create: true)
+        let guest = try Mailbox(directory.appendingPathComponent("exchange"), create: true)
+        let source = GuestObserverSource(directory: directory), lease = UUID().uuidString
+        let capture = Task { try await source.next() }
+        let transport = Task {
+            var closed = false
+            while !Task.isCancelled && !closed {
+                for request in try host.requests() { try host.respond(Reply(id: request.id, values: ["state": "running"])) }
+                for request in try guest.requests() {
+                    var values: [String: String] = [:]
+                    switch request.action {
+                    case "observe.capabilities": values = ["observeVersion": "1"]
+                    case "observe.open":
+                        capture.cancel()
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                        values = ["lease": lease, "epoch": UUID().uuidString]
+                    case "observe.close": XCTAssertEqual(request.arguments["lease"], lease); closed = true
+                    default: XCTFail("Cancelled open must not start polling")
+                    }
+                    try guest.respond(Reply(id: request.id, values: values))
+                }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            return closed
+        }
+        defer { capture.cancel(); transport.cancel(); withExtendedLifetime(lock) {} }
+        do { _ = try await capture.value; XCTFail("Capture was not cancelled") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await source.close()
+        let closed = try await transport.value; XCTAssertTrue(closed)
+    }
     func testGuestModeReopensAt480AndRestores640() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("observer-mode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -183,7 +219,7 @@ final class ObserverTransportTests: XCTestCase {
         }
         let source = GuestObserverSource(directory: directory, maxFPS: 10, showsCursor: false)
         do { _ = try await source.next(); XCTFail("Old helper accepted low mode") }
-        catch { XCTAssertTrue(error.localizedDescription.contains("Upgrade the Guest helper")) }
+        catch { XCTAssertEqual((error as? ObserverSourceFailure)?.code, "guest_unavailable") }
         transport.cancel(); _ = try await transport.value
         await source.close()
         withExtendedLifetime(lock) {}
@@ -202,35 +238,6 @@ final class ObserverTransportTests: XCTestCase {
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 404)
             let calls = await source.calls
             XCTAssertEqual(calls, 0)
-        } catch { await server.stop(); throw error }
-        await server.stop()
-    }
-    func testBrowserPreviewHarness() async throws {
-        guard let raw = ProcessInfo.processInfo.environment["OBSERVER_BROWSER_PORT"], let port = Int(raw) else {
-            throw XCTSkip("Set OBSERVER_BROWSER_PORT to run the browser fixture server")
-        }
-        let small = ProcessInfo.processInfo.environment["OBSERVER_BROWSER_LOW"] == "1"
-        let configuration = try ObserverConfiguration(maxFPS: small ? 10 : 30, bytesPerSecond: small ? 180_000 : nil,
-                                                       tileSize: small ? 64 : 128, pngPolicy: small ? .adaptive : .threshold(40))
-        let source = TestObserverSource(), server = ObserverServer(source: source, configuration: configuration, lowBandwidth: small)
-        let actual = try await server.start(port: port)
-        print("Browser fixture: http://127.0.0.1:\(actual)/")
-        let epoch = UUID().uuidString
-        let duration = Int(ProcessInfo.processInfo.environment["OBSERVER_BROWSER_SECONDS"] ?? "60") ?? 60
-        do {
-            for n in 0..<(duration * 2) {
-                let low = await source.lowBandwidth
-                let grid = try ObserverGrid(width: low ? 480 : 640, height: low ? 300 : 400)
-                var pixels = Data(count: grid.width * grid.height * 4)
-                for y in 0..<grid.height { for x in 0..<grid.width {
-                    let d = (y * grid.width + x) * 4
-                    let changed = (x < 32 && y < 32) || (x >= grid.width - 128 && y >= grid.height - 16)
-                    pixels[d] = changed ? UInt8(n % 200) : 240
-                    pixels[d + 1] = changed ? 32 : 245; pixels[d + 2] = changed ? 64 : 250; pixels[d + 3] = 255
-                } }
-                await source.set(ObserverCaptureResult(epoch: epoch, pixels: pixels, grid: grid, tiles: nil))
-                try await Task.sleep(nanoseconds: 500_000_000)
-            }
         } catch { await server.stop(); throw error }
         await server.stop()
     }
@@ -343,7 +350,7 @@ final class ObserverTransportTests: XCTestCase {
             let url = URL(string: "http://127.0.0.1:\(port)/")!
             let (page, response) = try await URLSession.shared.data(from: url)
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-            XCTAssertTrue(String(decoding: page, as: UTF8.self).contains("id=\"debug-title\">Debug"))
+            XCTAssertEqual(String(decoding: page, as: UTF8.self), "Observer test transport")
             XCTAssertEqual((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Cache-Control"), "no-store")
             let initialCalls = await source.calls
             XCTAssertEqual(initialCalls, 0)
@@ -376,7 +383,7 @@ final class ObserverTransportTests: XCTestCase {
                 (current, _) = try parse(await receiveImage(socket))
                 XCTAssertEqual(current["type"] as? String, "delta")
             }
-            try await socket.send(.string("{\"type\":\"pause\"}"))
+            socket.cancel(with: .normalClosure, reason: nil)
             try await Task.sleep(nanoseconds: 100_000_000)
         } catch { await server.stop(); throw error }
         await server.stop()

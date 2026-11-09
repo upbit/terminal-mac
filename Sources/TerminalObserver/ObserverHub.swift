@@ -1,17 +1,13 @@
 import Foundation
 import CoreFoundation
-import NIOCore
-import NIOWebSocket
 import TerminalMacCore
 
 actor ObserverHub {
     struct Peer {
-        let channel: Channel
+        let transport: ObserverTransport
         var client = ObserverClient()
         var active = false
-        var lastPong = Date(), lastPing = Date.distantPast
-        var nonce = ""
-        var started: Date?
+        var started: Double?
         var sentSeq: UInt64?
         var encoding: Task<Data, Error>?
         var encodingID: UUID?
@@ -29,19 +25,26 @@ actor ObserverHub {
     private var captureEpoch = "", error: String?
     private var captureTask: Task<Void, Never>?, timer: Task<Void, Never>?
     private var stopped = false
-    init(source: any ObserverSource, configuration: ObserverConfiguration = .standard, lowBandwidth: Bool = false) {
+    private var encodingWork: Task<Data, Error>?
+    private let encode: @Sendable (ObserverBatch, ObserverPNGPolicy) async throws -> Data
+    private let clock: @Sendable () -> Double
+    private let ackTimeout: Double
+    init(source: any ObserverSource, configuration: ObserverConfiguration = .standard, lowBandwidth: Bool = false,
+         ackTimeout: Double = 10, clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
+         encode: @escaping @Sendable (ObserverBatch, ObserverPNGPolicy) async throws -> Data = { try ObserverPNG.batch($0, policy: $1) }) {
         self.source = source; self.lowBandwidth = lowBandwidth
+        self.encode = encode; self.clock = clock; self.ackTimeout = ackTimeout
         standardConfiguration = lowBandwidth ? .standard : configuration
         lowConfiguration = lowBandwidth ? configuration : .low
     }
 
-    func add(_ id: UUID, channel: Channel) {
-        peers[id] = Peer(channel: channel, pacer: ObserverPacer(maxFPS: configuration.maxFPS, bytesPerSecond: configuration.bytesPerSecond))
-        sendMode(channel)
+    func add(_ id: UUID, transport: ObserverTransport) throws {
+        guard peers.isEmpty, !stopped else { throw RelayFailure("protocol_error") }
+        peers[id] = Peer(transport: transport, pacer: ObserverPacer(maxFPS: configuration.maxFPS, bytesPerSecond: configuration.bytesPerSecond))
         if timer == nil {
             timer = Task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                     if Task.isCancelled { break }
                     tick()
                 }
@@ -51,77 +54,75 @@ actor ObserverHub {
     func remove(_ id: UUID) {
         let peer = peers.removeValue(forKey: id)
         peer?.encoding?.cancel(); peer?.wake?.cancel()
-        if !peers.values.contains(where: { $0.active }) { captureTask?.cancel() }
+        peer?.transport.discard()
+        if !peers.values.contains(where: { $0.active }) { captureTask?.cancel(); latest = nil; captureEpoch = "" }
         if peers.isEmpty { timer?.cancel(); timer = nil }
     }
     func stop() async {
         stopped = true; timer?.cancel(); captureTask?.cancel()
-        for peer in peers.values { peer.encoding?.cancel(); peer.wake?.cancel(); peer.channel.close(promise: nil) }
+        for peer in peers.values { peer.encoding?.cancel(); peer.wake?.cancel(); peer.transport.discard() }
         peers.removeAll()
         await captureTask?.value
+        _ = try? await encodingWork?.value
         await source.close()
     }
     func control(_ id: UUID, data: Data) {
         guard var peer = peers[id] else { return }
         do {
-            guard data.count <= ObserverLimits.maxControlBytes,
+            guard data.count <= ObserverLimits.maxControlBytes, !data.contains(0), String(data: data, encoding: .utf8) != nil,
                   let message = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let type = message["type"] as? String else { throw Failure("Invalid control JSON") }
             let fields: Set<String>
             switch type {
             case "subscribe": fields = ["type", "v"]
             case "ack": fields = ["type", "epoch", "seq"]
-            case "resync", "pause", "resume": fields = ["type"]
-            case "pong": fields = ["type", "nonce"]
+            case "resync": fields = ["type"]
             case "mode": fields = ["type", "lowBandwidth"]
             default: throw Failure("Unknown observer control: \(type)")
             }
             guard Set(message.keys) == fields else { throw Failure("Unexpected observer control fields") }
             switch type {
             case "mode":
-                guard let value = message["lowBandwidth"] as? NSNumber,
+                guard peer.active, let value = message["lowBandwidth"] as? NSNumber,
                       CFGetTypeID(value) == CFBooleanGetTypeID() else { throw Failure("Invalid observer mode") }
                 setMode(value.boolValue)
-                sendMode(peer.channel)
+                if let current = peers[id] { try sendMode(current.transport) }
                 return
             case "subscribe":
-                guard !peer.active, message["v"] as? Int == 1 else { throw Failure("Invalid subscription") }
+                guard !peer.active, let version = message["v"] as? NSNumber,
+                      CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1 else { throw Failure("Invalid subscription") }
                 peer.active = true
+                try sendMode(peer.transport)
             case "ack":
                 guard peer.active, let epoch = message["epoch"] as? String, let seq = message["seq"] as? String,
-                      !seq.isEmpty, seq.count <= 20, seq.allSatisfy({ $0.isASCII && $0.isNumber }), let number = UInt64(seq) else {
+                      UUID(uuidString: epoch) != nil, !seq.isEmpty, seq.first != "0", seq.count <= 20,
+                      seq.allSatisfy({ $0.isASCII && $0.isNumber }), let number = UInt64(seq) else {
                     throw Failure("Invalid observer ACK")
                 }
-                if epoch == peer.client.epoch && number != peer.client.lastAck && peer.sentSeq != number {
+                let normalizedEpoch = UUID(uuidString: epoch)!.uuidString
+                if normalizedEpoch == peer.client.epoch && number != peer.client.lastAck && peer.sentSeq != number {
                     throw Failure("ACK arrived before the image was sent")
                 }
-                try peer.client.acknowledge(epoch: epoch, seq: number)
+                try peer.client.acknowledge(epoch: normalizedEpoch, seq: number)
                 if peer.client.inFlight == nil { peer.started = nil; peer.sentSeq = nil }
-            case "pause":
-                peer.active = false; peer.client.reset(); peer.started = nil; peer.sentSeq = nil; peer.encoding?.cancel()
-                peer.wake?.cancel(); peer.wake = nil
-            case "resume":
-                guard !peer.active else { throw Failure("Observer is already active") }
-                peer.active = true; peer.client.reset()
-            case "resync": peer.client.reset(); peer.started = nil; peer.sentSeq = nil; peer.encoding?.cancel()
-            case "pong":
-                guard let nonce = message["nonce"] as? String, nonce == peer.nonce else { throw Failure("Invalid heartbeat") }
-                peer.lastPong = Date()
+            case "resync":
+                guard peer.active else { throw Failure("Observer is not subscribed") }
+                peer.client.reset(); peer.started = nil; peer.sentSeq = nil; peer.encoding?.cancel(); peer.transport.discard()
             default: break
             }
             peers[id] = peer
             if peers.values.contains(where: { $0.active }) { startCapture() }
             else { captureTask?.cancel() }
-            if let error, peer.active { sendJSON(peer.channel, ["type": "error", "message": error]) }
+            if let error, peer.active { try sendJSON(peer.transport, ["type": "error", "code": error, "retryable": true]) }
             schedule(id)
-        } catch { fail(id, error.localizedDescription) }
+        } catch { fail(id, "protocol_error") }
     }
     private func startCapture() {
         guard captureTask == nil, !stopped else { return }
         captureTask = Task { await captureLoop() }
     }
-    private func sendMode(_ channel: Channel) {
-        sendJSON(channel, ["type": "mode", "lowBandwidth": lowBandwidth, "maxFps": configuration.maxFPS])
+    private func sendMode(_ transport: ObserverTransport) throws {
+        try sendJSON(transport, ["type": "mode", "lowBandwidth": lowBandwidth, "maxFps": configuration.maxFPS])
     }
     private func setMode(_ low: Bool) {
         guard low != lowBandwidth else { return }
@@ -131,7 +132,6 @@ actor ObserverHub {
         for id in Array(peers.keys) {
             reset(id)
             peers[id]?.pacer.configure(maxFPS: configuration.maxFPS, bytesPerSecond: configuration.bytesPerSecond)
-            if let peer = peers[id] { sendMode(peer.channel) }
         }
         if peers.values.contains(where: { $0.active }) { startCapture() }
     }
@@ -165,7 +165,7 @@ actor ObserverHub {
                     captureEpoch = capture.epoch; latest = snapshot
                     if error != nil {
                         error = nil
-                        for peer in peers.values { sendJSON(peer.channel, ["type": "state", "state": "connected"]) }
+                        for peer in peers.values { try sendJSON(peer.transport, ["type": "state", "state": "syncing"]) }
                     }
                     for id in Array(peers.keys) { schedule(id) }
                 }
@@ -173,9 +173,13 @@ actor ObserverHub {
                 if Task.isCancelled { break }
                 latest = nil; captureEpoch = ""
                 for id in Array(peers.keys) { reset(id) }
-                if self.error != error.localizedDescription {
-                    self.error = error.localizedDescription
-                    for peer in peers.values { sendJSON(peer.channel, ["type": "error", "message": error.localizedDescription]) }
+                let code = (error as? ObserverSourceFailure)?.code ?? "capture_failed"
+                if self.error != code {
+                    self.error = code
+                    for (id, peer) in peers {
+                        do { try sendJSON(peer.transport, ["type": "error", "code": code, "retryable": true]) }
+                        catch { fail(id, "slow_consumer") }
+                    }
                 }
                 await source.close()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -188,13 +192,14 @@ actor ObserverHub {
     private func reset(_ id: UUID) {
         guard var peer = peers[id] else { return }
         peer.client.reset(); peer.started = nil; peer.sentSeq = nil; peer.encoding?.cancel()
+        peer.transport.discard()
         peer.wake?.cancel(); peer.wake = nil
         peers[id] = peer
     }
     private func schedule(_ id: UUID) {
-        guard var peer = peers[id], peer.active, peer.encoding == nil, peer.channel.isActive,
-              peer.client.inFlight == nil, peer.channel.isWritable, let snapshot = latest else { return }
-        let delay = peer.pacer.delay(at: ProcessInfo.processInfo.systemUptime)
+        guard var peer = peers[id], peer.active, peer.encoding == nil, encodingWork == nil,
+              peer.client.inFlight == nil, let snapshot = latest else { return }
+        let delay = peer.pacer.delay(at: clock())
         if delay > 0 {
             if peer.wake == nil {
                 peer.wake = Task {
@@ -211,66 +216,64 @@ actor ObserverHub {
         peers[id] = peer
         do {
             guard let batch = try peer.client.reserve(snapshot) else { return }
-            peer.started = Date()
             if batch.full {
-                peer.controlBytes += sendJSON(peer.channel, ["type": "welcome", "v": 1, "epoch": batch.epoch,
+                try sendMode(peer.transport)
+                peer.controlBytes += try sendJSON(peer.transport, ["type": "welcome", "v": 1, "epoch": batch.epoch,
                                          "width": snapshot.grid.width, "height": snapshot.grid.height,
                                          "tileSize": snapshot.grid.tileSize, "codec": "png", "maxFps": configuration.maxFPS,
                                          "bytesPerSecond": configuration.bytesPerSecond ?? 0])
             }
-            let policy = configuration.pngPolicy
-            let task = Task.detached { try ObserverPNG.batch(batch, policy: policy) }, job = UUID()
+            let policy = configuration.pngPolicy, encode = self.encode
+            let task = Task.detached { try await encode(batch, policy) }, job = UUID()
+            encodingWork = task
             peer.encoding = task; peer.encodingID = job; peers[id] = peer
             Task {
                 do { let data = try await task.value; encoded(id, job: job, epoch: batch.epoch, data: data) }
                 catch { encodingFailed(id, job: job, epoch: batch.epoch, error: error) }
             }
-        } catch { fail(id, error.localizedDescription) }
+        } catch { fail(id, (error as? RelayFailure)?.code == "slow_consumer" ? "slow_consumer" : "protocol_error") }
     }
     private func wake(_ id: UUID) {
         guard var peer = peers[id] else { return }
         peer.wake = nil; peers[id] = peer; schedule(id)
     }
     private func encoded(_ id: UUID, job: UUID, epoch: String, data: Data) {
-        guard var peer = peers[id], peer.encodingID == job else { return }
+        encodingWork = nil
+        guard var peer = peers[id], peer.encodingID == job else {
+            for id in Array(peers.keys) { schedule(id) }; return
+        }
         peer.encoding = nil; peer.encodingID = nil
         if peer.client.epoch == epoch { peer.sentSeq = peer.client.inFlight?.seq }
         peers[id] = peer
         guard peer.client.epoch == epoch, peer.active else { schedule(id); return }
-        guard peer.channel.isWritable else { fail(id, "Observer socket is not writable"); return }
-        peer.pacer.sent(bytes: data.count + peer.controlBytes, at: ProcessInfo.processInfo.systemUptime)
-        peer.controlBytes = 0; peers[id] = peer
-        var buffer = peer.channel.allocator.buffer(capacity: data.count); buffer.writeBytes(data)
-        peer.channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .binary, data: buffer)).whenFailure { _ in
-            peer.channel.close(promise: nil)
-        }
+        peer.started = clock(); peers[id] = peer
+        do {
+            guard try peer.transport.send(data, true) else { remove(id); return }
+            peer.pacer.sent(bytes: data.count + peer.controlBytes, at: clock())
+            peer.controlBytes = 0; peers[id] = peer
+        } catch { fail(id, (error as? RelayFailure)?.code == "slow_consumer" ? "slow_consumer" : "protocol_error") }
     }
     private func encodingFailed(_ id: UUID, job: UUID, epoch: String, error: Error) {
-        guard var peer = peers[id], peer.encodingID == job else { return }
+        encodingWork = nil
+        guard var peer = peers[id], peer.encodingID == job else {
+            for id in Array(peers.keys) { schedule(id) }; return
+        }
         peer.encoding = nil; peer.encodingID = nil; peers[id] = peer
         if peer.client.epoch != epoch || error is CancellationError { schedule(id) }
-        else { fail(id, error.localizedDescription) }
+        else { fail(id, "protocol_error") }
     }
     private func tick() {
-        for (id, var peer) in peers {
-            if Date().timeIntervalSince(peer.lastPong) > 45 { fail(id, "Observer heartbeat timed out"); continue }
-            if let started = peer.started, Date().timeIntervalSince(started) > 10 { fail(id, "Observer ACK timed out"); continue }
-            if Date().timeIntervalSince(peer.lastPing) >= 15 {
-                peer.nonce = UUID().uuidString; peer.lastPing = Date(); peers[id] = peer
-                sendJSON(peer.channel, ["type": "ping", "nonce": peer.nonce])
-            }
+        for (id, peer) in peers {
+            if let started = peer.started, clock() - started > ackTimeout { fail(id, "session_timeout"); continue }
             schedule(id)
         }
     }
-    private func fail(_ id: UUID, _ message: String) {
+    private func fail(_ id: UUID, _ code: String) {
         guard let peer = peers[id] else { return }
-        sendJSON(peer.channel, ["type": "error", "message": message])
-        peer.channel.close(promise: nil); remove(id)
+        peer.transport.close(code); remove(id)
     }
-    @discardableResult private func sendJSON(_ channel: Channel, _ object: [String: Any]) -> Int {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return 0 }
-        var buffer = channel.allocator.buffer(capacity: data.count); buffer.writeBytes(data)
-        channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .text, data: buffer), promise: nil)
-        return data.count
+    @discardableResult private func sendJSON(_ transport: ObserverTransport, _ object: [String: Any]) throws -> Int {
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try transport.send(data, false) ? data.count : 0
     }
 }

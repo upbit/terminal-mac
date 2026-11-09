@@ -44,14 +44,15 @@ mkdir -p "$app/Contents/MacOS" "$guest/Contents/MacOS" \
 rm -f "$app/Contents/MacOS/terminal-mac" "$guest/Contents/MacOS/terminal-mac"
 cp "$binary_dir/terminal-mac" "$app/Contents/MacOS/terminal-mac"
 cp "$binary_dir/terminal-mac" "$guest/Contents/MacOS/terminal-mac"
-# SwiftPM resources must travel with both copies of the shared executable.
+# Remove obsolete local-viewer/test-only resources from previous installations.
 for name in terminal-mac_TerminalObserver.bundle swift-nio_NIOPosix.bundle; do
-  resource="$binary_dir/$name"
-  [[ -d "$resource" ]] || { echo "Resource is missing: $name" >&2; exit 1; }
   rm -rf "$app/Contents/Resources/$name" "$guest/Contents/Resources/$name"
-  cp -R "$resource" "$app/Contents/Resources/"
-  cp -R "$resource" "$guest/Contents/Resources/"
 done
+# Authentication is Host-only; the Guest never invokes or receives the login helper.
+auth_resource="$binary_dir/terminal-mac_TerminalMac.bundle"
+[[ -d "$auth_resource" ]] || { echo 'Authentication resource is missing.' >&2; exit 1; }
+rm -rf "$app/Contents/Resources/terminal-mac_TerminalMac.bundle"
+cp -R "$auth_resource" "$app/Contents/Resources/"
 make_plist() {
   local destination="$1" identifier="$2" name="$3"
   /usr/libexec/PlistBuddy -c 'Clear dict' "$destination" >/dev/null 2>&1 || true

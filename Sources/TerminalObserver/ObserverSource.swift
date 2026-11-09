@@ -19,6 +19,8 @@ public protocol ObserverSource: Sendable {
     func close() async
 }
 
+struct ObserverSourceFailure: Error { let code: String }
+
 public actor GuestObserverSource: ObserverSource {
     private let directory: URL
     private let standardWidth: Int
@@ -42,18 +44,27 @@ public actor GuestObserverSource: ObserverSource {
     }
 
     public func next() async throws -> ObserverCaptureResult? {
+        do { return try await capture() }
+        catch is CancellationError { throw CancellationError() }
+        catch let error as ObserverSourceFailure { throw error }
+        catch {
+            let code = error.localizedDescription == "Screen Recording is not allowed inside the VM" ? "permission_required" : "guest_unavailable"
+            throw ObserverSourceFailure(code: code)
+        }
+    }
+    private func capture() async throws -> ObserverCaptureResult? {
         let delay = nextPoll - ProcessInfo.processInfo.systemUptime
         if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
         let fd = open(directory.appendingPathComponent("runtime.lock").path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { throw Failure("VM is stopped") }
+        guard fd >= 0 else { throw ObserverSourceFailure(code: "vm_stopped") }
         let locked = flock(fd, LOCK_EX | LOCK_NB) != 0
         if !locked { flock(fd, LOCK_UN) }
         Darwin.close(fd)
-        guard locked else { throw Failure("VM is stopped") }
+        guard locked else { throw ObserverSourceFailure(code: "vm_stopped") }
         if Date().timeIntervalSince(statusChecked) >= 2 {
             let status = try await Mailbox(directory.appendingPathComponent("host-control")).call(Request(action: "status", timeout: 2))
             guard ["running", "stopping"].contains(status.values["state"] ?? "") else {
-                throw Failure("VM state: \(status.values["state"] ?? "unknown")")
+                throw ObserverSourceFailure(code: "vm_stopped")
             }
             statusChecked = Date()
         }
@@ -69,10 +80,16 @@ public actor GuestObserverSource: ObserverSource {
                 }
                 arguments["maxFps"] = String(maxFPS); arguments["cursor"] = showsCursor ? "show" : "hide"
             }
-            let reply = try await mailbox.call(Request(action: "observe.open", arguments: arguments, timeout: 5))
+            // Once open is submitted, receive its lease even if the viewer closes meanwhile.
+            // This bounded operation lets close() release it instead of waiting for Guest expiry.
+            let openArguments = arguments
+            let reply = try await Task.detached {
+                try await mailbox.call(Request(action: "observe.open", arguments: openArguments, timeout: 5))
+            }.value
             guard let lease = reply.values["lease"], UUID(uuidString: lease) != nil,
                   let epoch = reply.values["epoch"], UUID(uuidString: epoch) != nil else { throw Failure("Invalid observer open reply") }
             self.lease = lease; self.epoch = epoch; sequence = 0
+            try Task.checkCancellation()
         }
         let lease = self.lease!
         let request = Request(action: "observe.poll", arguments: ["lease": lease, "epoch": epoch, "after": String(sequence), "wait": "1000"], timeout: 3)

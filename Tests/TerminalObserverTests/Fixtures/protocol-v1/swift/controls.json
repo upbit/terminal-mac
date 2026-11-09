@@ -1,0 +1,13 @@
+{
+  "welcome" : {
+    "bytesPerSecond" : 180000,
+    "codec" : "png",
+    "epoch" : "664EEE97-28F4-4178-8794-5B22172FF3FC",
+    "height" : 66,
+    "maxFps" : 10,
+    "tileSize" : 64,
+    "type" : "welcome",
+    "v" : 1,
+    "width" : 130
+  }
+}

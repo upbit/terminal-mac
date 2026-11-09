@@ -1,0 +1,13 @@
+{
+  "relayVersion": 1,
+  "tmobVersion": 1,
+  "source": "tests/fixtures_protocol.py",
+  "sourceSha256": "cc2ce14358eff115bd2bb4b4ce56c7dfbaf8e280cd0268a06c47a7118f7468fa",
+  "files": {
+    "full.tmob": "6bb7fe9d14aed7c0b5c4018b2855cc6ec2c6e1609e8950fb1387179238373d5c",
+    "delta.tmob": "980fd0b26a87a6b8b7b53de28c8d90ed2f6bd159bb2b82d27bf1c4f1b39b44f8",
+    "oracle.tmob": "3d82ec2994c67a50025fedc447187354ec14b93289385f2fe86f5d2c059b32c7",
+    "corrupt.tmob": "e07271102c494334424c18cb6fac631e21af8055cceee0d2c47c04f75d9464e9",
+    "controls.json": "dc97f76aaaf95df374f510a314622aa16291f17757667473d750936c25227d38"
+  }
+}

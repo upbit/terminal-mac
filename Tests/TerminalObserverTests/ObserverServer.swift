@@ -4,6 +4,7 @@ import NIOPosix
 import NIOHTTP1
 import NIOWebSocket
 import TerminalMacCore
+@testable import TerminalObserver
 
 private final class ConnectionLimit: @unchecked Sendable {
     private let lock = NSLock()
@@ -72,16 +73,6 @@ public final class ObserverServer: @unchecked Sendable {
     static func validHost(_ head: HTTPRequestHead, channel: Channel) -> Bool {
         head.headers["Host"] == ["127.0.0.1:\(channel.localAddress!.port!)"]
     }
-    static let webBundle: Bundle = {
-        let name = "terminal-mac_TerminalObserver.bundle"
-        let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
-            .standardizedFileURL.resolvingSymlinksInPath()
-        let resources = executable.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
-        for root in [Bundle.main.resourceURL, resources].compactMap({ $0 }) {
-            if let bundle = Bundle(url: root.appendingPathComponent(name)) { return bundle }
-        }
-        return Bundle.module
-    }()
 }
 
 private final class ObserverHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
@@ -102,18 +93,10 @@ private final class ObserverHTTPHandler: ChannelInboundHandler, RemovableChannel
             guard let head, head.method == .GET, ObserverServer.validHost(head, channel: context.channel) else {
                 respond(context, status: .forbidden, data: Data("Loopback GET only".utf8), mime: "text/plain"); return
             }
-            let resource: (String, String)?
-            switch head.uri {
-            case "/": resource = ("index.html", "text/html; charset=utf-8")
-            case "/observer.js": resource = ("observer.js", "text/javascript; charset=utf-8")
-            case "/observer.css": resource = ("observer.css", "text/css; charset=utf-8")
-            default: resource = nil
-            }
-            guard let resource, let url = ObserverServer.webBundle.url(forResource: resource.0, withExtension: nil, subdirectory: "Web"),
-                  let data = try? Data(contentsOf: url) else {
+            guard head.uri == "/" else {
                 respond(context, status: .notFound, data: Data("Not found or invalid WebSocket upgrade".utf8), mime: "text/plain"); return
             }
-            respond(context, status: .ok, data: data, mime: resource.1)
+            respond(context, status: .ok, data: Data("Observer test transport".utf8), mime: "text/plain")
         }
     }
     private func respond(_ context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data, mime: String) {
@@ -139,7 +122,18 @@ private final class ObserverSocketHandler: ChannelInboundHandler {
     init(id: UUID, hub: ObserverHub) { self.id = id; self.hub = hub }
     func handlerAdded(context: ChannelHandlerContext) {
         let channel = context.channel
-        tail = Task { await hub.add(id, channel: channel) }
+        let transport = ObserverTransport(send: { data, binary in
+            guard channel.isActive, channel.isWritable else { throw RelayFailure("slow_consumer") }
+            var buffer = channel.allocator.buffer(capacity: data.count); buffer.writeBytes(data)
+            channel.writeAndFlush(WebSocketFrame(fin: true, opcode: binary ? .binary : .text, data: buffer)).whenFailure { _ in
+                channel.close(promise: nil)
+            }
+            return true
+        }, discard: {}, close: { _ in channel.close(promise: nil) })
+        tail = Task {
+            do { try await hub.add(id, transport: transport) }
+            catch { channel.close(promise: nil) }
+        }
     }
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let frame = unwrapInboundIn(data)
