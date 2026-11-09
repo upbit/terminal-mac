@@ -44,10 +44,7 @@ final class GuestRuntime: NSObject {
         GuestBootstrap.registerForGuestLogin()
         NSApp.setActivationPolicy(.regular)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 300), styleMask: [.titled, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "terminal-mac guest helper"
-        if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
-            window.title += " · r\(build)"
-        }
+        window.title = "terminal-mac guest helper · v\(appVersion)"
         let title = NSTextField(labelWithString: "This virtual Mac is ready for your agent.")
         title.font = .systemFont(ofSize: 19, weight: .semibold)
         let description = NSTextField(wrappingLabelWithString: "Allow Screen Recording and Accessibility inside this VM. Keep this helper running in your logged-in guest desktop. Your physical Mac is not controlled.")
@@ -163,7 +160,8 @@ final class GuestRuntime: NSObject {
                 let bounds = CGDisplayBounds(CGMainDisplayID())
                 values = ["screenRecording": String(CGPreflightScreenCaptureAccess()), "accessibility": String(AXIsProcessTrusted()),
                           "width": String(Int(bounds.width)), "height": String(Int(bounds.height)),
-                          "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"]
+                          "version": appVersion,
+                          "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"]
             case "screenshot" where request.arguments["format"] == "bgra-lz4":
                 guard CGPreflightScreenCaptureAccess() else { throw Failure("Allow Screen Recording for TerminalMacGuest inside the VM, then reopen the helper if macOS requests it") }
                 try await desktop.prepare(maxWidth: number(request, "maxWidth", range: 16...7680), maxHeight: number(request, "maxHeight", range: 16...4320))

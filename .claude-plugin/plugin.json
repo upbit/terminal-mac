@@ -1,6 +1,6 @@
 {
   "name": "terminal-mac",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "Computer use in a separate virtual Mac: screenshot, click, type and shortcut tools plus a skill for driving the guest. Requires the terminal-mac CLI on PATH.",
   "author": { "name": "Govijr", "url": "https://github.com/govijr" },
   "homepage": "https://github.com/govijr/terminal-mac",

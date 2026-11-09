@@ -16,8 +16,8 @@ if [[ -z "$identity" ]]; then
   fi
 fi
 echo "Signing with: $identity"
-version="${VERSION:-0.2.0}"
-build_number="${BUILD_NUMBER:-6}"
+version="${VERSION:-0.2.3}"
+build_number="${BUILD_NUMBER:-16}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
   echo 'VERSION must be x.y.z and BUILD_NUMBER a positive integer.' >&2
   exit 1
@@ -34,9 +34,12 @@ build_options=(--disable-sandbox --cache-path "$PWD/.build/cache" --config-path 
 swift build "${build_options[@]}" -c "$configuration"
 binary_dir="$(swift build "${build_options[@]}" -c "$configuration" --show-bin-path)"
 app="$PWD/dist/TerminalMac.app"
-guest="$app/Contents/Resources/guest-tools/TerminalMacGuest.app"
+guest_work="$(mktemp -d "$PWD/.build/guest-package.XXXXXX")"
+trap 'rm -rf "$guest_work"' EXIT
+guest="$guest_work/TerminalMacGuest.app"
+bundled_guest="$app/Contents/Resources/guest-tools/TerminalMacGuest.app"
 mkdir -p "$app/Contents/MacOS" "$guest/Contents/MacOS" \
-         "$app/Contents/Resources" "$guest/Contents/Resources"
+         "$app/Contents/Resources/guest-tools" "$guest/Contents/Resources"
 # Replace rather than overwrite: rewriting a running VM's executable in place can kill it.
 rm -f "$app/Contents/MacOS/terminal-mac" "$guest/Contents/MacOS/terminal-mac"
 cp "$binary_dir/terminal-mac" "$app/Contents/MacOS/terminal-mac"
@@ -79,6 +82,10 @@ make_plist "$guest/Contents/Info.plist" dev.terminal-mac.guest TerminalMacGuest
 make_plist "$app/Contents/Info.plist" dev.terminal-mac.host TerminalMac
 # Guest has no Virtualization entitlement. Its guarded mode only controls the VM desktop.
 codesign --force --sign "$identity" "${sign_options[@]}" "$guest"
+codesign --verify --strict "$guest"
+# Publish a complete bundle with fresh file identities to the mounted tools share.
+if [[ -e "$bundled_guest" ]]; then mv "$bundled_guest" "$guest_work/previous.app"; fi
+mv "$guest" "$bundled_guest"
 codesign --force --sign "$identity" "${sign_options[@]}" --entitlements resources/terminal-mac.entitlements "$app"
 ln -sfn TerminalMac.app/Contents/MacOS/terminal-mac dist/terminal-mac
 codesign --verify --deep --strict "$app"

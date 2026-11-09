@@ -12,7 +12,7 @@ case "${1:-}" in
   --help|-h) echo 'Usage: [VERSION=x.y.z BUILD_NUMBER=N] bash scripts/release.sh [--local|--notarized]'; exit 0 ;;
 esac
 [[ $# -eq 0 ]] || { echo 'Unexpected arguments. Use --help.' >&2; exit 1; }
-export VERSION="${VERSION:-0.2.0}" BUILD_NUMBER="${BUILD_NUMBER:-6}"
+export VERSION="${VERSION:-0.2.3}" BUILD_NUMBER="${BUILD_NUMBER:-16}"
 case "$mode" in
   local) export SIGN_IDENTITY=- ;;
   public)
