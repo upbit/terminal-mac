@@ -131,8 +131,15 @@ The automounted volume is supplied by macOS virtio-fs. If it is absent, check th
 ```sh
 terminal-mac connect default
 terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
+terminal-mac connect default --verbose
 terminal-mac disconnect default
 ```
+
+`--verbose` prints foreground authentication/connection diagnostics and the
+temporary binding URL to stderr. Cookie values and device keys remain hidden.
+The URL contains a short-lived confirmation token; remove it before sharing
+logs. Logging ends at background handoff. See [setup](docs/REMOTE_OBSERVER_SETUP.md)
+for diagnostic details and dependencies.
 
 `connect` replaces the local `observe` entry, which now only reports migration.
 The client supports SSO, Keychain credentials, restricted binding WSS, native QR,

@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import Vision
+import Darwin
 import TerminalObserver
 import TerminalMacCore
 @testable import TerminalMac
@@ -98,6 +99,41 @@ final class RemoteObserverTests: XCTestCase {
             _ = try await helper().authenticate(origin: RelayOrigin("https://oversized.example"), interactive: false)
             XCTFail("Accepted oversized helper output")
         } catch { XCTAssertEqual((error as? RelayFailure)?.code, "helper_protocol") }
+    }
+    func testProductHelperStartupThroughFoundationProcess() async throws {
+        let helper = try AuthSession()
+        do {
+            // Reject this config before dependencies, Keychain, Chrome or network access.
+            _ = try await helper.authenticate(origin: RelayOrigin("https://fixture.example"),
+                                              interactive: false, forceLogin: true)
+            XCTFail("Accepted noninteractive forced login")
+        } catch { XCTAssertEqual((error as? RelayFailure)?.code, "login_required") }
+    }
+    func testVerboseDiagnosticsValidateMetadataAndNeverLogCookies() async throws {
+        let saved = dup(STDERR_FILENO), pipe = Pipe()
+        XCTAssertGreaterThanOrEqual(saved, 0)
+        defer { dup2(saved, STDERR_FILENO); close(saved) }
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+        let origin = try RelayOrigin("https://fixture.example")
+        let detail: [String: Any] = ["stage": "process_setup", "function": "main", "line": 123,
+                                    "exceptionType": "PermissionError", "errno": 1]
+        var failure: [String: Any] = ["version": 1, "ok": false,
+            "error": ["code": "helper_protocol", "retryable": false], "diagnostic": detail]
+        XCTAssertThrowsError(try AuthSession.decode(JSONSerialization.data(withJSONObject: failure), origin: origin, verbose: true))
+        failure["diagnostic"] = detail.merging(["exceptionType": "secret\nforged-log"]) { _, new in new }
+        XCTAssertThrowsError(try AuthSession.decode(JSONSerialization.data(withJSONObject: failure), origin: origin, verbose: true))
+        let success: [String: Any] = ["version": 1, "ok": true, "origin": origin.value, "username": "fixture-user", "relayVersion": 1,
+            "cookies": [["name": "sso", "value": "cookie-secret", "domain": "fixture.example", "path": "/", "secure": true, "expires": -1]]]
+        _ = try AuthSession.decode(JSONSerialization.data(withJSONObject: success), origin: origin, verbose: true)
+        let url = try origin.bindingURL("/pair#token=" + String(repeating: "A", count: 43))
+        observerDebug("binding URL: \(url)", verbose: true)
+        observerDebug("quiet-sentinel", verbose: false)
+        dup2(saved, STDERR_FILENO)
+        try pipe.fileHandleForWriting.close()
+        let log = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(log.contains("stage=process_setup function=main line=123 exception=PermissionError errno=1"))
+        XCTAssertTrue(log.contains(url.absoluteString))
+        for secret in ["cookie-secret", "secret", "forged-log", "quiet-sentinel"] { XCTAssertFalse(log.contains(secret)) }
     }
     func testHelperCancellationReapsProcess() async throws {
         let helper = try helper(), origin = try RelayOrigin("https://slow.example")

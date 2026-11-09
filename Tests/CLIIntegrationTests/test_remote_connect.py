@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import signal
+import sys
 import tempfile
 import unittest
 
@@ -70,7 +71,30 @@ class ConnectCLITests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [])
         help_result = self.run_cli('help')
         self.assertIn("connect [NAME]", help_result.stdout)
+        self.assertIn("--verbose", help_result.stdout)
         self.assertNotIn("observe [NAME]", help_result.stdout)
+
+    def test_verbose_authentication_diagnostics_are_opt_in(self):
+        self.machine()
+        self.env["TERMINAL_MAC_PYTHON"] = sys.executable
+        # Inherited environment must not enable diagnostics without the CLI flag.
+        self.env["TERMINAL_MAC_AUTH_VERBOSE"] = "1"
+        for flags in [(), ("--verbose",)]:
+            with self.subTest(flags=flags):
+                result = self.run_cli('connect', '--server', 'https://example.net', '--force-login', *flags)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SSO login is required", result.stderr)
+                self.assertEqual(result.stdout, "")
+                if flags:
+                    self.assertIn("[connect] auth helper started pid=", result.stderr)
+                    self.assertIn("pgid=", result.stderr)
+                    self.assertIn("auth helper exited status=0", result.stderr)
+                    self.assertIn("stage=read_config function=read_config", result.stderr)
+                    self.assertIn("exception=AuthFailure errno=none", result.stderr)
+                    self.assertIn("auth failed code=login_required retryable=false", result.stderr)
+                    self.assertIn("worker exited status=", result.stderr)
+                else:
+                    self.assertNotIn("[connect]", result.stderr)
 
     def test_worker_frontend_eof_and_signal_release_lock(self):
         directory = self.machine()

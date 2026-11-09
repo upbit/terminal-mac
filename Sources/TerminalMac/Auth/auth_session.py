@@ -352,19 +352,37 @@ def read_config(stream):
 def main():
     if sys.stdin.isatty() or sys.stdout.isatty():
         return 2
+    stage = "process_setup"
+    diagnostic = None
     try:
-        os.setsid()
+        # Foundation Process already gives the helper its own process group on macOS.
+        if os.getpgrp() != os.getpid():
+            os.setsid()
         def cancel(_number, _frame):
             raise AuthFailure("cancelled")
         signal.signal(signal.SIGTERM, cancel)
         signal.signal(signal.SIGINT, cancel)
+        stage = "read_config"
         config = read_config(sys.stdin.buffer)
+        stage = "dependencies"
         sync_playwright, keychain = dependencies(config["interactive"])
+        stage = "authenticate"
         result = authenticate(config, sync_playwright, keychain)
-    except AuthFailure as error:
-        result = {"version": VERSION, "ok": False, "error": {"code": error.code, "retryable": error.retryable}}
-    except BaseException:
-        result = {"version": VERSION, "ok": False, "error": {"code": "helper_protocol", "retryable": False}}
+    except BaseException as error:
+        code = error.code if isinstance(error, AuthFailure) else "helper_protocol"
+        retryable = error.retryable if isinstance(error, AuthFailure) else False
+        result = {"version": VERSION, "ok": False, "error": {"code": code, "retryable": retryable}}
+        if os.environ.get("TERMINAL_MAC_AUTH_VERBOSE") == "1":
+            # Only local code locations and numeric errno, never exception text or locals.
+            trace = error.__traceback__
+            while trace is not None:
+                if trace.tb_frame.f_code.co_filename == __file__:
+                    diagnostic = {"stage": stage, "function": trace.tb_frame.f_code.co_name,
+                                  "line": trace.tb_lineno, "exceptionType": type(error).__name__,
+                                  "errno": error.errno if isinstance(error, OSError) else None}
+                trace = trace.tb_next
+            if diagnostic is not None:
+                result["diagnostic"] = diagnostic
     raw = json.dumps(result, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     if len(raw) > MAX_RESULT:
         raw = b'{"version":1,"ok":false,"error":{"code":"helper_protocol","retryable":false}}'

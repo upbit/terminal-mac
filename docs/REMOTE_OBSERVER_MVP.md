@@ -55,6 +55,8 @@
 - 首版明确依赖本机 Chrome、Python 3.11+、固定版本的 Playwright/keyring，并提供依赖检查、安装说明和 helper 资源定位。不得运行时静默安装依赖。登录过程中用户交互可取消，失败应有可辨识错误。
 - 将来原生化或封装 Python 运行时属于安装体验优化，不阻塞本 MVP，也不宣称当前包已无外部运行依赖。
 
+2026-11-09 排障补充（用户确认）：`connect --verbose` 只启用前台 stderr 诊断，不增加进程或改动绑定/后台生命周期。helper 的可选结构化错误位置沿既有有界结果管道返回，不输出原始异常、Cookie 或设备密钥。显式 verbose 模式允许打印已校验的二维码链接（含短期 scanToken）、pairingId 和有效期，作为默认不打印二维码的排障例外；分享日志前须删去该确认凭据。后台 detach 后不继续打印。
+
 WSS 热路径由 Swift 客户端负责。优先采用 `URLSessionWebSocketTask`，对目标网关的 Cookie/Header、代理/TLS、拒绝跳转、发送完成和大小限制做窄范围适配回归；若不满足再选成熟客户端库，不自行实现 WebSocket。
 
 ## 4. 模块边界与关键改动

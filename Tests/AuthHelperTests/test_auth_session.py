@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 import unittest
@@ -50,6 +52,44 @@ class AuthHelperTests(unittest.TestCase):
         self.assert_code("helper_protocol", auth.read_config, io.BytesIO(b"x" * 8193))
         self.assert_code("helper_protocol", auth.read_config, io.BytesIO(json.dumps(self.config(extra=1)).encode()))
         self.assert_code("login_required", auth.read_config, io.BytesIO(json.dumps(self.config(forceLogin=True)).encode()))
+
+    def test_main_accepts_inherited_group_own_group_and_own_session(self):
+        config = self.config(origin="http://invalid.example")
+        for options in [{}, {"process_group": 0}, {"start_new_session": True}]:
+            with self.subTest(options=options):
+                result = subprocess.run([sys.executable, "-B", str(HELPER)],
+                    input=json.dumps(config), capture_output=True, text=True, timeout=5, **options)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(json.loads(result.stdout), {"version": 1, "ok": False,
+                    "error": {"code": "invalid_server", "retryable": False}})
+
+    def test_verbose_error_diagnostic_excludes_exception_message_and_secrets(self):
+        secret = "cookie-secret device-key-secret token-secret"
+        for verbose in [False, True]:
+            with self.subTest(verbose=verbose), patch.dict(auth.os.environ, {"TERMINAL_MAC_AUTH_VERBOSE": "1" if verbose else "0"}), \
+                    patch.object(auth.os, "setsid"), patch.object(auth.sys, "stdin") as stdin, \
+                    patch.object(auth.sys, "stdout") as stdout, patch.object(auth.sys, "stderr") as stderr, \
+                    patch.object(auth, "dependencies", side_effect=PermissionError(1, secret)):
+                stdin.isatty.return_value = stdout.isatty.return_value = False
+                stdin.buffer = io.BytesIO(json.dumps(self.config()).encode())
+                stdout.buffer = io.BytesIO()
+                self.assertEqual(auth.main(), 0)
+                raw = stdout.buffer.getvalue()
+                result = json.loads(raw)
+                self.assertNotIn(secret.encode(), raw)
+                stderr.write.assert_not_called()
+                self.assertEqual(result["error"]["code"], "helper_protocol")
+                if verbose:
+                    detail = result["diagnostic"]
+                    self.assertEqual(set(detail), {"stage", "function", "line", "exceptionType", "errno"})
+                    self.assertEqual(detail["stage"], "dependencies")
+                    self.assertEqual(detail["function"], "main")
+                    self.assertEqual(detail["exceptionType"], "PermissionError")
+                    self.assertEqual(detail["errno"], 1)
+                    self.assertGreater(detail["line"], 0)
+                else:
+                    self.assertNotIn("diagnostic", result)
 
     def test_cookie_scope_path_host_only_expiry_and_secure(self):
         records = [COOKIE, {**COOKIE, "name": "api", "domain": ".example.net", "path": "/api"},

@@ -44,8 +44,26 @@ directly: its stdin/stdout carry private bounded IPC, not a terminal protocol.
 terminal-mac connect default
 terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
 terminal-mac connect default --force-login
+terminal-mac connect default --verbose
 terminal-mac disconnect default
 ```
+
+`--verbose` writes foreground connection diagnostics to stderr: selected origin,
+helper/Python paths, process IDs, exit status, result byte count, elapsed time,
+validated error code and local helper error location, binding events and detach.
+It also prints the validated temporary binding URL (including scanToken),
+pairingId and expiry. This URL is a short-lived confirmation credential, not
+public metadata: remove it before sharing logs. Cookie values, device keys,
+raw HTTP headers, response bodies and Python exception messages are never logged.
+The helper returns optional structured error metadata over its existing bounded
+private result pipe; raw Python/Chrome stderr remains suppressed. Logging ends
+when the foreground detaches; this is not a background tracing or file-log mode.
+
+The helper preserves its own process group when Foundation has already created
+one; it calls `setsid()` only when inheriting another group. Calling `setsid()`
+as a process-group leader fails with EPERM before dependency or SSO checks and
+was previously reported as `helper_protocol`. No cache reset is needed for this
+startup failure. `--force-login` does not repair it; use a rebuilt client.
 
 The background worker acquires the VM's existing `observer.lock` before
 configuration, server selection or login. An absent VM fails immediately. `connect` never calls `up`,
@@ -76,7 +94,8 @@ For first binding, the device key is saved before WSS creation/begin. Keychain
 failure aborts without a QR or binding submission. Returned binding paths must
 be exactly `/pair#token=<scanToken>` on the selected origin. QR is encoded locally
 by CoreImage, integer-scaled into an AppKit window with a white quiet zone and
-fixed 306-point area. It is held only in memory, not printed/logged or saved.
+fixed 306-point area. It is held only in memory by default, not printed or saved;
+the explicit `--verbose` diagnostic mode prints its URL as described above.
 The window shows countdown, grey overlay and regenerate button after expiry;
 there is no scanned state and no success screen. The browser confirmation button
 uses the same temporary URL and is disabled on expiry.

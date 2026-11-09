@@ -259,6 +259,7 @@ final class CLI {
       [--hide-cursor]           Exclude the Guest cursor from remote observation
       [--server https://HOST]   Select the HTTPS service; default SSO login
       [--force-login]           Replace this service's SSO cache using Chrome
+      [--verbose]               Print connection diagnostics and temporary binding URL to stderr
     disconnect [NAME]           Stop the background observer without unbinding
     show|hide [NAME]             Show or hide the native VM window
     status|pause|resume [NAME]   Manage the VM
