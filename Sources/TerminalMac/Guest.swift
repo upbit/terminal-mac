@@ -233,6 +233,8 @@ final class GuestRuntime: NSObject {
                     guard !chunk.isEmpty else { return }
                     guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                           let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw Failure("Cannot create keyboard event") }
+                    // Literal text must not inherit modifiers from a preceding shortcut.
+                    down.flags = []; up.flags = []
                     chunk.withUnsafeBufferPointer { ptr in down.keyboardSetUnicodeString(stringLength: ptr.count, unicodeString: ptr.baseAddress!) }
                     down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap); chunk.removeAll(keepingCapacity: true)
                 }

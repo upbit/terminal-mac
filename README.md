@@ -117,6 +117,8 @@ The viewer supports typing, left/right clicks, double and triple clicks, draggin
 
 The guest helper keeps a ScreenCaptureKit stream open while a viewer is watching. It sends a frame only when the screen changes (up to 30 fps), already sized to the pixels the terminal draws, as lossless lz4-compressed pixels. Kitty and Ghostty receive those frames through shared memory rather than the pty. An idle desktop costs nothing, and the stream stops 15 seconds after the viewer leaves. From build 4 on, the guest helper updates itself: within 30 seconds of a newer build appearing in the shared tools folder, it installs that build and relaunches. Helpers from build 3 and earlier still work but poll full screenshots, and the header shows "snapshots". Update those once by opening `/Volumes/My Shared Files/tools/TerminalMacGuest.app` in the guest. Releases are signed with one unchanging self-signed certificate, so the guest keeps its Screen Recording and Accessibility approvals across updates.
 
+Guest helper updates must satisfy the running helper's designated code requirement. Stable certificate-signed builds retain their update identity. An ad-hoc rebuild generally has a different code identity and is refused by automatic updates; install it manually inside the guest and grant its permissions again.
+
 Agents can drive the guest through an MCP server: `claude mcp add terminal-mac -- "$PWD/dist/terminal-mac" mcp default`. See [docs/AGENT.md](docs/AGENT.md).
 
 New VMs use a 2x HiDPI display (for example 2560×1600 pixels at 220 ppi for the default 1280×800 points), so text stays sharp on Retina terminals. Switch a stopped VM with `terminal-mac display default --hidpi` or `--standard`.

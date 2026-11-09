@@ -8,6 +8,8 @@ enum GuestBootstrap {
         try GuestGuard.requireVirtualMac()
         guard Bundle.main.bundleIdentifier == "dev.terminal-mac.guest" else { return false }
         let source = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let identity = try CodeIdentity()
+        try identity.validate(source)
         let applications = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
         let destination = applications.appendingPathComponent("TerminalMacGuest.app")
         if source == destination.resolvingSymlinksInPath() { return false }
@@ -31,6 +33,7 @@ enum GuestBootstrap {
             let staging = applications.appendingPathComponent(".TerminalMacGuest-\(UUID().uuidString).app")
             defer { try? FileManager.default.removeItem(at: staging) }
             try FileManager.default.copyItem(at: source, to: staging)
+            try identity.validate(staging)
             let backup = applications.appendingPathComponent(".TerminalMacGuest-backup-\(UUID().uuidString).app")
             if exists { try FileManager.default.moveItem(at: destination, to: backup) }
             do { try FileManager.default.moveItem(at: staging, to: destination) }
@@ -53,6 +56,8 @@ enum GuestBootstrap {
         guard Bundle.main.bundleURL.resolvingSymlinksInPath() != shared.resolvingSymlinksInPath(),
               let available = Bundle(url: shared)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String, let newer = Int(available),
               let running = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""), newer > running else { return }
+        do { try CodeIdentity().validate(shared) }
+        catch { stderr("Guest helper update refused: \(error.localizedDescription)"); return }
         stderr("Updating the guest helper from build \(running) to \(newer)…")
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
