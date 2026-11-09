@@ -154,6 +154,41 @@ final class RemoteObserverTests: XCTestCase {
             XCTAssertFalse(CLI.retryObserverFailure(RelayFailure(code, retryable: true)))
         }
     }
+    func testInteractiveServerSelectionRequiresManualOrigin() throws {
+        XCTAssertEqual(try CLI.selectObserverOrigin(server: nil, previous: nil, interactive: true,
+            readInput: { "  https://EXAMPLE.net:443/  " }).value, "https://example.net")
+        for input in ["", "   "] {
+            XCTAssertThrowsError(try CLI.selectObserverOrigin(server: nil, previous: nil, interactive: true,
+                readInput: { input })) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Enter an HTTPS server origin"))
+            }
+        }
+        for input in ["1", "2", "http://example.net", "https://example.net/path"] {
+            XCTAssertThrowsError(try CLI.selectObserverOrigin(server: nil, previous: nil, interactive: true,
+                readInput: { input })) { error in
+                XCTAssertEqual((error as? RelayFailure)?.code, "invalid_server")
+            }
+        }
+        XCTAssertThrowsError(try CLI.selectObserverOrigin(server: nil, previous: nil, interactive: true,
+            readInput: { nil })) { error in XCTAssertTrue(error is CancellationError) }
+    }
+    func testServerSelectionReusesSavedOriginAndAllowsOverride() throws {
+        for input in ["", "   "] {
+            XCTAssertEqual(try CLI.selectObserverOrigin(server: nil, previous: "https://example.net", interactive: true,
+                readInput: { input }).value, "https://example.net")
+        }
+        XCTAssertEqual(try CLI.selectObserverOrigin(server: nil, previous: "https://example.net", interactive: true,
+            readInput: { "https://other.example" }).value, "https://other.example")
+        for interactive in [false, true] {
+            XCTAssertEqual(try CLI.selectObserverOrigin(server: "https://other.example", previous: "https://example.net",
+                interactive: interactive, readInput: { XCTFail("Explicit server must skip input"); return nil }).value,
+                "https://other.example")
+            XCTAssertThrowsError(try CLI.selectObserverOrigin(server: "http://example.net", previous: "https://example.net",
+                interactive: interactive, readInput: { XCTFail("Invalid explicit server must not prompt"); return nil }))
+        }
+        XCTAssertEqual(try CLI.selectObserverOrigin(server: nil, previous: "https://example.net", interactive: false,
+            readInput: { XCTFail("Noninteractive connect must skip input"); return nil }).value, "https://example.net")
+    }
     func testRemovedObserveAndPortDoNotEnterAuthentication() async throws {
         for args in [["observe", "--port", "0"], ["connect", "--port", "0"]] {
             do { try await CLI().run(args); XCTFail("Removed entry was accepted") }

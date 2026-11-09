@@ -167,26 +167,22 @@ extension CLI {
         let mailbox = try Mailbox(directory.appendingPathComponent("remote-observer-control"))
         return try await mailbox.call(Request(action: "status", timeout: 1)).values
     }
-    static func selectObserverOrigin(server: String?, previous: String?, interactive: Bool) throws -> RelayOrigin {
+    static func selectObserverOrigin(server: String?, previous: String?, interactive: Bool,
+                                     readInput: () -> String? = { readLine() }) throws -> RelayOrigin {
         if let server { return try RelayOrigin(server) }
         if !interactive {
             guard let previous else { throw Failure("Noninteractive connect requires --server or a previously authenticated server.") }
             return try RelayOrigin(previous)
         }
-        print("Observer server:")
-        print("  1. Default service (\(RelayOrigin.defaultServer))")
-        print("  2. Other HTTPS origin")
-        print("Server [\(previous ?? "1")]: ", terminator: ""); fflush(stdout)
-        guard let choice = readLine() else { throw CancellationError() }
-        switch choice.trimmingCharacters(in: .whitespaces) {
-        case "": return try RelayOrigin(previous ?? RelayOrigin.defaultServer)
-        case "1": return try RelayOrigin(RelayOrigin.defaultServer)
-        case "2":
-            print("HTTPS origin: ", terminator: ""); fflush(stdout)
-            guard let server = readLine() else { throw CancellationError() }
-            return try RelayOrigin(server.trimmingCharacters(in: .whitespaces))
-        default: return try RelayOrigin(choice)
+        let prompt = previous.map { "HTTPS server [\($0)]: " } ?? "HTTPS server: "
+        print(prompt, terminator: ""); fflush(stdout)
+        guard let input = readInput() else { throw CancellationError() }
+        let value = input.trimmingCharacters(in: .whitespaces)
+        if value.isEmpty {
+            guard let previous else { throw Failure("Enter an HTTPS server origin or pass --server https://HOST.") }
+            return try RelayOrigin(previous)
         }
+        return try RelayOrigin(value)
     }
     static func retryObserverFailure(_ failure: RelayFailure) -> Bool {
         ["network_error", "server_unavailable", "heartbeat_timeout", "send_timeout", "session_timeout", "device_busy",

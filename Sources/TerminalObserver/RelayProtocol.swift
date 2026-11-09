@@ -3,7 +3,6 @@ import CoreFoundation
 import TerminalMacCore
 
 public struct RelayOrigin: Equatable, Codable, Sendable {
-    public static let defaultServer = "https://remote-mac-nqnifo3z.devnet-app.with.woa.com"
     public let value: String
     public init(_ input: String) throws {
         guard input.utf8.count <= 2048, !input.isEmpty,

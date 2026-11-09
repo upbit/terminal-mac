@@ -3,7 +3,7 @@
 Date: 2026-11-09. Exact cancellation only; no automatic pending replacement.
 Shared protocol v1 section 2.1.2 is normative. Server and native worker changes
 are implemented and locally tested; this document is synchronized in both
-repositories. Real Keychain/With/mobile verification remains pending.
+repositories. Real Keychain/service/mobile verification remains pending.
 
 ## Client Flow
 

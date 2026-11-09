@@ -2,7 +2,7 @@
 
 Current boundary: client P0-P3 and local P4 preparation are implemented, including
 Hub full/delta/ACK, ready barriers and capture cleanup. Local synthetic joint
-verification passed; real With/Guest/mobile acceptance is not performed.
+verification passed; real service/Guest/mobile acceptance is not performed.
 `relayVersion=1`, `tmobVersion=1`; fields and limits follow the shared protocol in
 `../../specs/REMOTE_OBSERVER_PROTOCOL_V1.md`.
 
@@ -42,11 +42,19 @@ directly: its stdin/stdout carry private bounded IPC, not a terminal protocol.
 
 ```sh
 terminal-mac connect default
-terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
+terminal-mac connect default --server https://observer.example.net
 terminal-mac connect default --force-login
 terminal-mac connect default --verbose
 terminal-mac disconnect default
 ```
+
+There is no built-in server URL. Replace `https://observer.example.net` with your
+deployed relay's HTTPS origin (scheme, host and optional port, no path).
+`--server` configures the selected service without prompting. Otherwise an
+interactive terminal prompts for the address; Enter reuses the last successfully
+authenticated server only when one is saved. First use requires manual input or
+`--server`. The saved address is per VM in `remote-observer.json`; noninteractive
+startup accepts `--server` or that saved address and never prompts.
 
 `--verbose` writes foreground connection diagnostics to stderr: selected origin,
 helper/Python paths, process IDs, exit status, result byte count, elapsed time,

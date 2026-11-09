@@ -130,7 +130,7 @@ The automounted volume is supplied by macOS virtio-fs. If it is absent, check th
 
 ```sh
 terminal-mac connect default
-terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
+terminal-mac connect default --server https://observer.example.net
 terminal-mac connect default --verbose
 terminal-mac disconnect default
 ```
@@ -152,7 +152,11 @@ its tests now live in the server repository, not in the client app.
 Local synthetic Swift/relay/Chrome verification passed; real SSO/Guest/mobile
 acceptance has not been performed.
 
-Interactive startup selects a server unless `--server` is supplied. SSO first
+There is no built-in server URL; `https://observer.example.net` is a placeholder
+for your deployed relay. Use `--server` to configure its HTTPS origin. The last
+successfully authenticated server is saved per VM in `remote-observer.json`.
+Interactive startup prompts for the origin unless `--server` is supplied;
+Enter reuses the saved address only when one exists. SSO first
 checks this program's saved Keychain session, attempts one silent renewal, and
 opens an isolated Chrome context only when login is needed. `--force-login`
 replaces the selected service's SSO cache. First binding needs explicit browser

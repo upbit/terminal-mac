@@ -257,7 +257,7 @@ final class CLI {
       [--protocol kitty|iterm]    Ctrl+G opens Mac shortcuts; Ctrl+] exits
     connect [NAME]              Connect to the platform; keep the observer in background
       [--hide-cursor]           Exclude the Guest cursor from remote observation
-      [--server https://HOST]   Select the HTTPS service; default SSO login
+      [--server https://HOST]   Set the HTTPS service; otherwise prompt or reuse saved server
       [--force-login]           Replace this service's SSO cache using Chrome
       [--verbose]               Print connection diagnostics and temporary binding URL to stderr
     disconnect [NAME]           Stop the background observer without unbinding

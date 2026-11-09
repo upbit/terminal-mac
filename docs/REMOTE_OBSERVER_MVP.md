@@ -13,7 +13,7 @@
 | SSO 后访问入口、带票据 WSS、二进制回显与重连 | 用户已完成 `sso_probe.py` 实测；探针发送 32 KiB 随机数据 | 接受可行性结论；迁移登录能力，只回归变更的路径/客户端，不重做平台调研 |
 | Guest 独立采集、PNG full/tiles、累计 dirty、revision/ACK、pacing | 现有 `ObserverSource`、`ObserverHub`、`TerminalMacCore/Observer.swift` 及本地测试 | 复用并回归，不重写算法 |
 | Canvas 校验、解码、绘制后 ACK | 现有 `Web/observer.js` 与 JS 测试 | 迁到服务器仓库，修改连接与外层消息适配 |
-| connect、扫码绑定、凭证复用、Swift 设备 WSS、观看转发 | 已有本地实现和合成联合测试 | 真实 With/Guest/手机验收仍需执行，不能以合成测试替代 |
+| connect、扫码绑定、凭证复用、Swift 设备 WSS、观看转发 | 已有本地实现和合成联合测试 | 真实服务/Guest/手机验收仍需执行，不能以合成测试替代 |
 
 验收对象是“本人注册后，通过服务器只读查看 Guest 当前画面”。设备在线不等于 Guest 正常，更不等于任务正在执行或已完成。
 
@@ -23,7 +23,7 @@
 
 本轮取代此前“每次启动重新输码、票据只在进程内、退出即注销、离线 30 分钟删除”的决定。服务器仍无数据库；电脑允许在 Keychain 保存设备凭证，以便断网、重启 CLI 后复用绑定。
 
-三个概念严格分开：SSO 确认账号；首次扫码确认设备绑定；日常在 With 列表选择已绑定在线设备观看。不能把“二维码只是观看捷径、电脑仅凭 SSO 自动绑定”当成最终方案。
+三个概念严格分开：SSO 确认账号；首次扫码确认设备绑定；日常在服务的设备列表选择已绑定在线设备观看。不能把“二维码只是观看捷径、电脑仅凭 SSO 自动绑定”当成最终方案。
 
 ## 2. WSS 验证后仍需开发什么
 
@@ -113,10 +113,10 @@ flowchart TD
 
 ```sh
 terminal-mac connect default
-terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.with.woa.com
+terminal-mac connect default --server https://observer.example.net
 ```
 
-`default` 是 VM 名；省略名称继续用现有 machineName() 的 default。交互启动且未传 --server 时让用户选择“默认服务”或输入其他 HTTPS origin，默认地址为 `https://remote-mac-nqnifo3z.devnet-app.with.woa.com`；已有上次成功的选择时回车可复用。--server 跳过选择，网络重连绝不再弹选择菜单。
+`default` 是 VM 名；省略名称继续用现有 machineName() 的 default。程序不内置服务器地址，`https://observer.example.net` 仅为占位示例，需替换为实际部署的 HTTPS origin。交互启动且未传 --server 时提示手工输入；已有上次成功认证的地址时回车可复用，否则必须输入。--server 直接配置本次入口，成功认证后按 VM 保存至 `remote-observer.json`；网络重连绝不再次提示输入。
 
 选定入口后复用 SSO，读取该 origin/账号/observerId 下的设备 key。已有 key 用 Bearer 恢复绑定或 pending；首次没有 key 时先本地生成并保存，再只凭 SSO 建受限 WSS。绑定确认前绝不采集，不因建联成功就显示 online。切换服务器不能转移原设备凭证。
 
@@ -130,13 +130,13 @@ terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.wit
 4. 服务器通过原 WSS 推送 relay.hello(state=online, deviceId)。不再通过 HTTP 领取 key，也不等手机返回 key；key 早已在电脑 Keychain。若通知丢失，用这个 key 重连即可恢复同一已确认绑定。
 5. 手机显示“绑定成功”，提供“前往我的设备”。用户打开 `/devices`，选择本人已绑定的在线设备后才进入 `/watch/{deviceId}` 并建立观看 WSS；绑定成功本身不开始截图。
 
-二维码只包含短期 scanToken，不能用于设备 WSS 身份认证或长期观看。设备 key 不进入二维码/手机页面，也没有事后“取回 key”的接口。扫码绑定、电脑 OA 登录以及日常观看是不同操作；同账号 SSO 不能代替要求的首次绑定确认。
+二维码只包含短期 scanToken，不能用于设备 WSS 身份认证或长期观看。设备 key 不进入二维码/手机页面，也没有事后“取回 key”的接口。扫码绑定、电脑 SSO 登录以及日常观看是不同操作；同账号 SSO 不能代替要求的首次绑定确认。
 
 扫码是默认绑定交互；终端无法可靠展示二维码时可打开同一绑定确认链接，但仍走相同账号校验和显式确认，不增加自动绑定或手输码协议。
 
 二维码采用系统 CoreImage 的 QR 编码器或成熟库，整数倍显示并保留静区；不手写编码、不调用第三方在线二维码服务。普通终端可显示字符二维码，终端太窄/渲染不可靠时显示同一短期链接，由用户在浏览器打开确认；不再维护另一套手输码绑定流程。短期链接可在交互屏幕展示，但不写入持久日志。
 
-手机 With 与 WS 能力已确认；仅需针对新绑定页回归 SSO 回跳。页面读 fragment 后清理地址栏，必要时短期放同源 sessionStorage，确认/取消/到期后删除。若网关在 JS 前跳转且丢失 token，可先登录再扫同一有效 QR，不改成免鉴权确认。绑定后日常观看不依赖 fragment、扫码页面或其缓存。
+手机浏览器与 WS 能力已确认；仅需针对新绑定页回归 SSO 回跳。页面读 fragment 后清理地址栏，必要时短期放同源 sessionStorage，确认/取消/到期后删除。若网关在 JS 前跳转且丢失 token，可先登录再扫同一有效 QR，不改成免鉴权确认。绑定后日常观看不依赖 fragment、扫码页面或其缓存。
 
 ### 5.3 绑定不是在线连接
 
@@ -144,17 +144,17 @@ terminal-mac connect default --server https://remote-mac-nqnifo3z.devnet-app.wit
 | --- | --- | --- |
 | 短暂断网、手机关闭/重新打开 | 复用设备凭证；电脑退避重连，新观看会话首先 full | 否 |
 | Ctrl+C 后重新 connect、电脑重启后手工启动 | 读取 Keychain；服务端仍保留该绑定则恢复同一 deviceId | 否 |
-| SSO 过期 | 按 sso_probe 行为续期或重新登录；同账号设备凭证仍有效则恢复 | 不因 SSO 过期而重新绑定，但 OA 可能要求登录扫码 |
+| SSO 过期 | 按 sso_probe 行为续期或重新登录；同账号设备凭证仍有效则恢复 | 不因 SSO 过期而重新绑定，但身份服务可能要求登录扫码 |
 | 服务端重启、绑定被显式撤销、离线超过 7 天被清理 | 旧凭证验证失败，创建新的短期二维码 | 是；全内存服务不承诺跨重启恢复 |
 | 更换服务器或账号 | 使用隔离的凭证条目；没有匹配绑定才创建二维码 | 视目标是否已有有效绑定 |
 | 绑定确认通知丢失、deviceId 索引未写入 | 用预存 key 重连，服务端返回已确认 deviceId；若仍 pending 则重发原绑定 URL | 有效请求/绑定存在时不用重新确认 |
-| 二维码过期、扫码页缓存清空 | 已确认绑定不变，从 With 的设备列表直接选在线设备 | 否 |
+| 二维码过期、扫码页缓存清空 | 已确认绑定不变，从服务的设备列表直接选在线设备 | 否 |
 
 服务器在线期间保留绑定；下线后保留 7 天，不再 8 小时强制到期或离线 30 分钟删除。正常断开不删绑定，只有网页“解绑”撤销；电脑收到权威失效后清理对应设备条目，不清其他服务器/账号的凭证。SSO 缓存和绑定凭证的期限独立。
 
 Keychain 保存失败时不发 begin、不出二维码，不退回明文文件。确认过程中不生成新 key；服务器只保存摘要。pending 中断后用已保存 key 恢复原请求；服务端不存在记录时才重新发起扫码，不能只用本地 observerId 重建归属。
 
-MVP 不做原地换 key：已有 Device 时新的 begin 被拒绝，key 丢失需先在 With 解绑，再新扫码；重绑得到新 deviceId。有效或 pending key 未被明确判失效前不能覆盖，不新增双 key/回滚存储。解绑会一并删除二维码对应的 pending/confirmed 票据，旧 key 和旧 QR 都不能恢复授权；SSO 登录本身不恢复设备。
+MVP 不做原地换 key：已有 Device 时新的 begin 被拒绝，key 丢失需先在服务的设备列表解绑，再新扫码；重绑得到新 deviceId。有效或 pending key 未被明确判失效前不能覆盖，不新增双 key/回滚存储。解绑会一并删除二维码对应的 pending/confirmed 票据，旧 key 和旧 QR 都不能恢复授权；SSO 登录本身不恢复设备。
 
 key 已写入但 begin 尚未到达服务器时，重连可能得到规范 binding_invalid。交互模式可进入新的扫码流程，但必须重新确认；网络错误/通用关闭码不能作为删 key 的依据。来自旧连接的失效回调必须比对原 key/连接代次，不能删掉后来建立的新条目。
 
@@ -173,9 +173,9 @@ key 已写入但 begin 尚未到达服务器时，重连可能得到规范 bindi
 
 | 阶段 | 本次要写的代码 | 本阶段出口 | 不作为前置条件 |
 | --- | --- | --- | --- |
-| P0 connect 与认证迁移 | 默认服务器选择、observe 移除、产品 helper、Swift 认证适配 | sso_probe 登录行为可复用；手机已验证能力不重做调研，受限 WSS 无图片权限 | WKWebView、纯 Swift 登录、永久无感续登、打包全部依赖 |
+| P0 connect 与认证迁移 | 手工配置服务器、observe 移除、产品 helper、Swift 认证适配 | sso_probe 登录行为可复用；手机已验证能力不重做调研，受限 WSS 无图片权限 | WKWebView、纯 Swift 登录、永久无感续登、打包全部依赖 |
 | P1 WSS 扫码绑定 | 本地生成并保存 key、受限 WSS begin/ready、手机确认、online 推送、pending/绑定恢复 | 未确认不能上线采集；确认丢消息不丢 key；扫码成功不自动观看；重复/错误确认安全 | HTTP 领取/轮询、PNG 上行、服务端数据库、10 设备压测 |
-| P2 独立观看闭环 | With 设备列表/选择、观看页、Hub transport、TMOB 上行、Canvas/ACK | 从列表选择本人在线设备，无需二维码或 key；真实 full/delta 正确；关观看设备仍在线 | 全套 debug UI、长期内存测试、性能目标调优 |
+| P2 独立观看闭环 | 服务设备列表/选择、观看页、Hub transport、TMOB 上行、Canvas/ACK | 从列表选择本人在线设备，无需二维码或 key；真实 full/delta 正确；关观看设备仍在线 | 全套 debug UI、长期内存测试、性能目标调优 |
 | P3 核心故障恢复 | 错误分类、完整解绑/重绑、通知丢失、旧会话失效、隐藏关闭/恢复、改档回归 | C01..C07 通过；旧 key/QR 都不能恢复；已有绑定不因普通错误重新出码；不原地替换有效 key | 双 key/回滚、历史录制、后台常驻、账号管理系统 |
 | P4 产品清理与交付 | 帮助/依赖说明、资源定位、移除生产本地入口和实验依赖、签名包、独立测试 | C08 和服务端必要联合验收通过；双方版本/限制记录清楚 | 原生登录替换、分发器/多档缓存重构、性能专项 |
 
